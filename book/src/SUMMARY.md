@@ -15,6 +15,10 @@
 
 - [Benchmarks](07-bench.md)
 
+# Concurrency
+
+- [Concurrency](09-concurrency.md)
+
 # Beyond v1.0
 
 - [What is not yet implemented](08-not-yet.md)

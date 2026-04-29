@@ -15,10 +15,12 @@ design decision in plain language.
 
 ## Status
 
-v1.1.0. Five didactic phases plus durability hardening (v1.0.1) and
-opt-in group commit (v1.1.0). Fifty plus tests across integration,
-property, and contract suites, full mdBook published alongside the
-code. See the [CHANGELOG](CHANGELOG.md) for what each tag delivered.
+v1.2.0. Five didactic phases plus durability hardening (v1.0.1),
+opt-in group commit (v1.1.0), and `Send + Sync + Clone` with
+parallel reads and a background flusher thread (v1.2.0). Fifty
+six tests across integration, property, contract, and concurrency
+suites, full mdBook published alongside the code. See the
+[CHANGELOG](CHANGELOG.md) for what each tag delivered.
 
 ## Quickstart
 
@@ -46,6 +48,7 @@ lattice compact
 | v1.0.0 | Snapshots, criterion benches, finished book            |
 | v1.0.1 | Directory `fsync` on rename + Railway/crates.io deploy |
 | v1.1.0 | `WriteOptions`, group commit, dual MIT/Apache-2.0      |
+| v1.2.0 | `Send + Sync + Clone`, parallel reads, flusher thread  |
 
 ## Deployment
 

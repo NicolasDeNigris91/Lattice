@@ -7,6 +7,58 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-04-29
+
+### Added
+- `Lattice` is now `Send + Sync + Clone`. Cloning is one atomic
+  increment on a shared `Arc<Inner>`; multiple threads can hold a
+  handle and read the database in parallel. Writes still serialise
+  through a single WAL mutex.
+- `State` introduces a `frozen: Option<Arc<MemTable>>` slot so a
+  flush can drain the active memtable without ever leaving readers
+  unable to find data they previously wrote. Read-your-writes is
+  preserved across the SSTable build.
+- Background flusher thread `lattice-flusher` honours
+  `LatticeBuilder::commit_window`. Non-durable writes are now
+  guaranteed to reach stable storage within the configured window
+  even when no further writes arrive to cross the batch threshold.
+  The thread holds a `Weak<Inner>`, exits cleanly when the last
+  handle drops, and is joined by `Inner::Drop` before the final
+  sync.
+- `tests/concurrency.rs`: `lattice_is_send_and_sync` (compile-time
+  assertion), `cloned_handle_observes_writes_from_origin`,
+  `clone_keeps_database_alive_after_origin_drops`, and
+  `many_readers_and_one_writer_see_consistent_state` (stress: 8
+  reader threads against 2000 durable puts).
+- `tests/group_commit.rs`:
+  `background_flusher_syncs_within_commit_window` (TDD-driven; the
+  RED was watched before the timer thread was implemented).
+- `bench_concurrent_random_read_hits` covers 1, 2, 4, 8 reader
+  threads. Aggregate throughput on the development machine: 56k
+  reads/s (1t) -> 143k reads/s (8t), a 2.55x scaling.
+- Book chapter 9 ("Concurrency") explains the new shape, the
+  frozen-memtable trick, the background flusher, and the
+  measured numbers.
+
+### Changed
+- Every public method on `Lattice` now takes `&self` instead of
+  `&mut self`. Source-compatible: code that compiled with `&mut
+  self` continues to compile with `&self`.
+- `Lattice::flush` no longer holds the active memtable lock for
+  the duration of the SSTable build; it moves the data into
+  `state.frozen` first, then releases the locks.
+
+### Removed
+- `Lattice::set_flush_threshold` and `Lattice::set_compaction_threshold`
+  (both were `#[doc(hidden)]`). Migrate to
+  `Lattice::builder(path).flush_threshold_bytes(n).compaction_threshold(n).open()`.
+
+### Deferred
+- Background compactor (`compact_async` / `compact_blocking`) was
+  planned for M2.4 and pushed to v1.3. `compact()` remains
+  blocking; rare in practice and the lock-discipline change is
+  large enough to warrant its own milestone.
+
 ## [1.1.0] - 2026-04-29
 
 ### Added
@@ -194,7 +246,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   case to exercise replay.
 - Book chapters 1 (the write ahead log) and 2 (the memtable).
 
-[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.2.0
 [1.1.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.1.0
 [1.0.1]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.0.1
 [1.0.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.0.0
