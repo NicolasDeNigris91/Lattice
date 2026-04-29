@@ -4,6 +4,9 @@
 //! `target/criterion/report/index.html`.
 
 use std::hint::black_box;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use lattice_core::{Lattice, WriteOptions};
@@ -128,6 +131,57 @@ fn bench_scan_all(c: &mut Criterion) {
     });
 }
 
+/// Throughput of `get` under concurrent readers sharing one
+/// `Lattice` handle (cloned `Arc<Inner>`). Measures the wall-clock
+/// time for `THREADS` threads to each issue `READS_PER_THREAD`
+/// random hits, after a fresh database has been populated with `N`
+/// keys. Pairs with `random_read_hits_10k` (single-threaded
+/// baseline) to make the M2 concurrency speedup visible. The
+/// reported time is per iteration of all threads taken together.
+fn bench_concurrent_random_read_hits(c: &mut Criterion) {
+    const READS_PER_THREAD: usize = N / 4;
+
+    for threads in [1usize, 2, 4, 8] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Lattice::open(dir.path()).unwrap();
+        for i in 0..N {
+            db.put(&key(i), b"value-bytes").unwrap();
+        }
+        db.flush().unwrap();
+
+        let id = format!("concurrent_random_read_hits_{threads}t_{READS_PER_THREAD}r");
+        c.bench_function(&id, |b| {
+            b.iter(|| {
+                let stop = Arc::new(AtomicBool::new(false));
+                let mut handles = Vec::with_capacity(threads);
+                for t in 0..threads {
+                    let db = db.clone();
+                    let stop = Arc::clone(&stop);
+                    handles.push(thread::spawn(move || {
+                        let mut i = t * 7919 % N;
+                        for _ in 0..READS_PER_THREAD {
+                            if stop.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            i = (i + 7919) % N;
+                            let v = db.get(&key(i)).unwrap();
+                            black_box(v);
+                        }
+                    }));
+                }
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+        });
+
+        // Hold onto resources until the bench iteration completes;
+        // dropping inside `iter` would skew the reported time.
+        drop(db);
+        drop(dir);
+    }
+}
+
 criterion_group!(
     benches,
     bench_sequential_write,
@@ -135,5 +189,6 @@ criterion_group!(
     bench_random_read_hits,
     bench_random_read_misses,
     bench_scan_all,
+    bench_concurrent_random_read_hits,
 );
 criterion_main!(benches);
