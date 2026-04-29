@@ -20,6 +20,8 @@ enum Op {
     Delete(Vec<u8>),
     /// Force a flush of the memtable into a new `SSTable`.
     Flush,
+    /// Force a compaction that merges every `SSTable` into one.
+    Compact,
 }
 
 fn arb_key() -> impl Strategy<Value = Vec<u8>> {
@@ -44,6 +46,7 @@ fn arb_op() -> impl Strategy<Value = Op> {
         8 => (arb_key(), arb_value()).prop_map(|(k, v)| Op::Put(k, v)),
         2 => arb_key().prop_map(Op::Delete),
         1 => Just(Op::Flush),
+        1 => Just(Op::Compact),
     ]
 }
 
@@ -78,6 +81,9 @@ proptest! {
                     }
                     Op::Flush => {
                         db.flush().unwrap();
+                    }
+                    Op::Compact => {
+                        db.compact().unwrap();
                     }
                 }
             }

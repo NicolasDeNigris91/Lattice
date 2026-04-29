@@ -100,7 +100,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Compact => {
-            anyhow::bail!("compaction lands in Phase 4 (v0.4)")
+            let mut db = Lattice::open(&cli.path).context("open database")?;
+            db.compact().context("compact failed")?;
+            Ok(ExitCode::SUCCESS)
         }
     }
 }

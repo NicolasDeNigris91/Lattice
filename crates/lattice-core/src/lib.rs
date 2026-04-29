@@ -10,18 +10,21 @@
 #![forbid(unsafe_code)]
 
 mod bloom;
+mod compaction;
 mod error;
+mod manifest;
 mod memtable;
 mod sstable;
 mod wal;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use tracing::info;
+use tracing::{info, warn};
 
 pub use crate::error::{Error, Result};
+use crate::manifest::Manifest;
 use crate::memtable::{Lookup, MemTable};
 use crate::sstable::{SSTableReader, SSTableWriter, SsLookup};
 use crate::wal::{LogEntry, Wal};
@@ -29,9 +32,13 @@ use crate::wal::{LogEntry, Wal};
 /// Default memtable size (in bytes) before an auto-flush is triggered.
 const DEFAULT_FLUSH_THRESHOLD_BYTES: usize = 4 * 1024 * 1024;
 
+/// Default number of live `SSTable`s before an auto-compaction is
+/// triggered. Tunable via [`Lattice::set_compaction_threshold`].
+const DEFAULT_COMPACTION_THRESHOLD: usize = 4;
+
 /// `SSTable` filename format. Six zero-padded digits, lexicographic order
 /// matches sequence order up to one million tables, which is enough for
-/// any realistic Phase 2 workload.
+/// any realistic Phase 4 workload.
 const SSTABLE_DIGITS: usize = 6;
 
 /// An open Lattice database.
@@ -42,6 +49,7 @@ pub struct Lattice {
     sstables: Vec<SSTableReader>,
     next_seq: u64,
     flush_threshold_bytes: usize,
+    compaction_threshold: usize,
 }
 
 impl std::fmt::Debug for Lattice {
@@ -52,6 +60,7 @@ impl std::fmt::Debug for Lattice {
             .field("memtable_bytes", &self.memtable.approx_size())
             .field("next_seq", &self.next_seq)
             .field("flush_threshold_bytes", &self.flush_threshold_bytes)
+            .field("compaction_threshold", &self.compaction_threshold)
             .finish_non_exhaustive()
     }
 }
@@ -59,15 +68,26 @@ impl std::fmt::Debug for Lattice {
 impl Lattice {
     /// Open or create a database in the given directory.
     ///
-    /// Creates the directory if absent. Discovers existing `SSTable`s,
-    /// replays the write-ahead log into a fresh memtable, then opens the
-    /// WAL for further appends.
+    /// Creates the directory if absent. Loads the manifest (or
+    /// bootstraps one), opens the listed `SSTable`s, deletes any orphan
+    /// `*.sst` files left over from a crash mid-compaction, then
+    /// replays the write-ahead log.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         fs::create_dir_all(&path)?;
 
-        let sstables = discover_sstables(&path)?;
-        let next_seq = sstables.last().map_or(1, |t| t.seq() + 1);
+        let manifest = match Manifest::load(&path)? {
+            Some(m) => m,
+            None => bootstrap_manifest(&path)?,
+        };
+
+        let live: BTreeSet<u64> = manifest.table_seqs.iter().copied().collect();
+        delete_orphans(&path, &live)?;
+
+        let mut sstables = Vec::with_capacity(live.len());
+        for seq in &manifest.table_seqs {
+            sstables.push(SSTableReader::open(&sstable_path(&path, *seq), *seq)?);
+        }
 
         let wal_path = path.join("wal.log");
         let (wal, entries) = Wal::open(&wal_path)?;
@@ -80,7 +100,7 @@ impl Lattice {
         }
         info!(
             sstables = sstables.len(),
-            next_seq,
+            next_seq = manifest.next_seq,
             path = %path.display(),
             "lattice opened"
         );
@@ -90,8 +110,9 @@ impl Lattice {
             memtable,
             wal,
             sstables,
-            next_seq,
+            next_seq: manifest.next_seq,
             flush_threshold_bytes: DEFAULT_FLUSH_THRESHOLD_BYTES,
+            compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
         })
     }
 
@@ -99,6 +120,12 @@ impl Lattice {
     #[doc(hidden)]
     pub const fn set_flush_threshold(&mut self, bytes: usize) {
         self.flush_threshold_bytes = bytes;
+    }
+
+    /// Override the auto-compaction threshold. Mostly useful for tests.
+    #[doc(hidden)]
+    pub const fn set_compaction_threshold(&mut self, tables: usize) {
+        self.compaction_threshold = tables;
     }
 
     /// Insert or overwrite a value for `key`.
@@ -148,7 +175,6 @@ impl Lattice {
     /// Iterate live key-value pairs in key order. If `prefix` is `Some`,
     /// only keys starting with it are returned.
     pub fn scan(&self, prefix: Option<&[u8]>) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        // Newest-source-wins merge across memtable and SSTables.
         let mut accumulator: BTreeMap<Vec<u8>, Option<Vec<u8>>> = BTreeMap::new();
 
         for (key, value) in self.memtable.iter_all() {
@@ -180,8 +206,6 @@ impl Lattice {
         let final_path = sstable_path(&self.path, seq);
         let tmp_path = self.path.join(format!("{seq:0SSTABLE_DIGITS$}.sst.tmp"));
 
-        // Write to a temp file so a crash mid-write leaves no
-        // half-formed `.sst` for `discover_sstables` to pick up.
         let _ = fs::remove_file(&tmp_path);
         let entries = self.memtable.drain();
         {
@@ -197,8 +221,48 @@ impl Lattice {
         self.sstables.push(reader);
         self.next_seq = self.next_seq.saturating_add(1);
 
+        self.persist_manifest()?;
         self.wal.truncate()?;
         info!(seq, path = %final_path.display(), "sstable flushed");
+
+        self.maybe_compact()?;
+        Ok(())
+    }
+
+    /// Run a compaction across every live `SSTable`, replacing them
+    /// with a single merged table that drops tombstones. No-op if there
+    /// are fewer than two tables.
+    pub fn compact(&mut self) -> Result<()> {
+        if self.sstables.len() < 2 {
+            return Ok(());
+        }
+        let new_seq = self.next_seq;
+        let final_path = sstable_path(&self.path, new_seq);
+        let tmp_path = self
+            .path
+            .join(format!("{new_seq:0SSTABLE_DIGITS$}.sst.tmp"));
+        let _ = fs::remove_file(&tmp_path);
+
+        compaction::compact_all(&self.sstables, &tmp_path)?;
+        fs::rename(&tmp_path, &final_path)?;
+        let new_reader = SSTableReader::open(&final_path, new_seq)?;
+
+        let old_seqs: Vec<u64> = self.sstables.iter().map(SSTableReader::seq).collect();
+        // Replace readers in memory before persisting the manifest, so
+        // that a panic between rename and save still leaves the engine
+        // in-memory state consistent with the on-disk new file.
+        self.sstables.clear();
+        self.sstables.push(new_reader);
+        self.next_seq = self.next_seq.saturating_add(1);
+        self.persist_manifest()?;
+
+        for seq in old_seqs {
+            let path = sstable_path(&self.path, seq);
+            if let Err(err) = fs::remove_file(&path) {
+                warn!(?err, path = %path.display(), "could not delete old sstable");
+            }
+        }
+        info!(new_seq, "compaction complete");
         Ok(())
     }
 
@@ -213,14 +277,71 @@ impl Lattice {
         }
         Ok(())
     }
+
+    fn maybe_compact(&mut self) -> Result<()> {
+        if self.sstables.len() >= self.compaction_threshold {
+            self.compact()?;
+        }
+        Ok(())
+    }
+
+    fn persist_manifest(&self) -> Result<()> {
+        let manifest = Manifest {
+            version: 1,
+            next_seq: self.next_seq,
+            table_seqs: self.sstables.iter().map(SSTableReader::seq).collect(),
+        };
+        manifest.save(&self.path)
+    }
 }
 
 fn sstable_path(dir: &Path, seq: u64) -> PathBuf {
     dir.join(format!("{seq:0SSTABLE_DIGITS$}.sst"))
 }
 
-fn discover_sstables(dir: &Path) -> Result<Vec<SSTableReader>> {
-    let mut entries: Vec<(u64, PathBuf)> = Vec::new();
+/// Bootstrap a manifest by scanning the directory for existing
+/// `*.sst` files. Used the first time the engine opens a directory
+/// that pre-dates the manifest, or that was created by an older
+/// (pre-v0.4) version of Lattice.
+fn bootstrap_manifest(dir: &Path) -> Result<Manifest> {
+    let seqs = scan_sst_seqs(dir)?;
+    let next_seq = seqs.last().copied().map_or(1, |s| s + 1);
+    let manifest = Manifest {
+        version: 1,
+        next_seq,
+        table_seqs: seqs,
+    };
+    manifest.save(dir)?;
+    Ok(manifest)
+}
+
+fn delete_orphans(dir: &Path, live: &BTreeSet<u64>) -> Result<()> {
+    let on_disk = scan_sst_seqs(dir)?;
+    for seq in on_disk {
+        if !live.contains(&seq) {
+            let path = sstable_path(dir, seq);
+            if let Err(err) = fs::remove_file(&path) {
+                warn!(?err, path = %path.display(), "could not delete orphan sstable");
+            }
+        }
+    }
+    // Also clean any leftover .sst.tmp files.
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let p = entry.path();
+        if p.extension().is_some_and(|e| e == "tmp")
+            && p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".sst.tmp"))
+        {
+            let _ = fs::remove_file(&p);
+        }
+    }
+    Ok(())
+}
+
+fn scan_sst_seqs(dir: &Path) -> Result<Vec<u64>> {
+    let mut seqs = Vec::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -229,14 +350,9 @@ fn discover_sstables(dir: &Path) -> Result<Vec<SSTableReader>> {
         }
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         if let Ok(seq) = stem.parse::<u64>() {
-            entries.push((seq, path));
+            seqs.push(seq);
         }
     }
-    entries.sort_by_key(|(seq, _)| *seq);
-
-    let mut readers = Vec::with_capacity(entries.len());
-    for (seq, path) in entries {
-        readers.push(SSTableReader::open(&path, seq)?);
-    }
-    Ok(readers)
+    seqs.sort_unstable();
+    Ok(seqs)
 }

@@ -7,6 +7,29 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-29
+
+### Added
+- Tiered compaction that merges every live `SSTable` into a single
+  replacement, dropping tombstones (safe at the bottom of the LSM).
+- `Lattice::compact()` public API + `lattice compact` CLI subcommand.
+- Auto-compaction when the live SSTable count reaches a configurable
+  threshold (default 4).
+- Persistent `MANIFEST` file (`bincode`, atomic save via temp + rename
+  + `fsync`) tracking `next_seq` and the live SSTable sequence numbers.
+- Orphan cleanup on `open`: any `*.sst` file whose sequence number is
+  absent from the manifest is deleted, recovering the disk left over
+  from a crash mid-compaction.
+- Bootstrap path for directories that pre-date the manifest: scan
+  existing `*.sst` files and write the manifest summarising them.
+- 9 new integration tests covering manual compact, auto-compact at
+  threshold, tombstone dropping, reopen after compact, manifest
+  presence, orphan deletion, no-op compactions, and big-flush
+  scenarios.
+- Property test extended with an `Op::Compact` variant. Generated
+  sequences mix put, delete, flush, and compact.
+- Book chapter 5 (compaction).
+
 ## [0.3.0] - 2026-04-29
 
 ### Added
@@ -69,7 +92,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   case to exercise replay.
 - Book chapters 1 (the write ahead log) and 2 (the memtable).
 
-[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v0.4.0
 [0.3.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v0.3.0
 [0.2.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v0.2.0
 [0.1.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v0.1.0
