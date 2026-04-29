@@ -7,6 +7,37 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-04-29
+
+### Added
+- `Lattice::transaction(|tx| { ... })`: closure-style transaction
+  with snapshot-isolated reads, in-memory write staging, atomic
+  commit on `Ok`, and automatic rollback on `Err` or panic.
+- `Transaction::get`, `Transaction::put`, `Transaction::delete`:
+  read-your-writes within the transaction (staged writes shadow
+  the snapshot) and accumulate the staged set for commit.
+- New test file `tests/transactions.rs` with seven contract tests
+  written test-first: snapshot isolation across a concurrent
+  outside write, read-your-writes inside the transaction, atomic
+  commit visibility (also after reopen), rollback on closure
+  returning `Err`, rollback on closure panic, read-only
+  transactions, and concurrent transactions on disjoint keys.
+- Book chapter 11 ("Transactions") explains the API, the
+  isolation contract, the rollback semantics, and the deferred
+  conflict-detection work.
+
+### Notes
+- v1.4 ships **without conflict detection**. Two transactions
+  that touch the same key may both commit; the second writer
+  wins (the lost-update problem). This is documented in the
+  book chapter. Real conflict detection (per-key write-seq
+  tracking compared to the transaction's snapshot-seq) lands in
+  v1.5 once the lock-discipline change to keep the check and
+  the apply atomic with respect to plain puts is properly
+  designed.
+- Transactions have no on-disk format implications. v1.3
+  directories open under v1.4 unchanged, and vice versa.
+
 ## [1.3.0] - 2026-04-29
 
 ### Added
@@ -296,7 +327,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   case to exercise replay.
 - Book chapters 1 (the write ahead log) and 2 (the memtable).
 
-[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.4.0
 [1.3.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.3.0
 [1.2.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.2.0
 [1.1.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.1.0

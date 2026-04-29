@@ -15,13 +15,14 @@ design decision in plain language.
 
 ## Status
 
-v1.3.0. Five didactic phases plus durability hardening (v1.0.1),
+v1.4.0. Five didactic phases plus durability hardening (v1.0.1),
 opt-in group commit (v1.1.0), `Send + Sync + Clone` with parallel
-reads and a background flusher thread (v1.2.0), and size-tiered
-leveled compaction with manifest v2 (v1.3.0). Sixty tests across
-integration, property, contract, and concurrency suites, full
-mdBook published alongside the code. See the [CHANGELOG](CHANGELOG.md)
-for what each tag delivered.
+reads and a background flusher thread (v1.2.0), size-tiered
+leveled compaction with manifest v2 (v1.3.0), and snapshot-isolated
+transactions with atomic commit and rollback (v1.4.0). Sixty seven
+tests across integration, property, contract, concurrency, and
+transaction suites, full mdBook published alongside the code. See
+the [CHANGELOG](CHANGELOG.md) for what each tag delivered.
 
 ## Quickstart
 
@@ -51,6 +52,7 @@ lattice compact
 | v1.1.0 | `WriteOptions`, group commit, dual MIT/Apache-2.0      |
 | v1.2.0 | `Send + Sync + Clone`, parallel reads, flusher thread  |
 | v1.3.0 | Manifest v2, size-tiered leveled compaction             |
+| v1.4.0 | Transactions: snapshot isolation, atomic commit         |
 
 ## Deployment
 
