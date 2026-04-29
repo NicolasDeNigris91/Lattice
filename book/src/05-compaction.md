@@ -132,4 +132,85 @@ amplification at the cost of a second tier of bloom checks. The book's
 Phase 5 splits compaction onto a background task and serializes the
 manifest update with a mutex.
 
+## v1.3: cascading levels
+
+The original "merge everything into one table" worked for the
+phases of the book, but it has the worst possible write
+amplification: every byte ever written gets rewritten on every
+compaction. v1.3 replaces it with a per-level cascade.
+
+The on-disk shape gains levels:
+
+```rust
+struct Manifest {
+    version: u32,                  // = 2
+    next_seq: u64,
+    levels: Vec<Vec<u64>>,         // levels[0] = L0, levels[1] = L1, ...
+}
+```
+
+Manifests written by v1.0..v1.2 (`version = 1`) are still readable;
+`Manifest::load` peeks the version byte and migrates legacy
+`table_seqs` into `levels[0]`, where the leveled algorithm can
+normalise them.
+
+The algorithm
+-------------
+
+Per-level threshold (default four). When level `Ln` reaches the
+threshold, the auto-compaction trigger picks the shallowest such
+level, merges every table in `Ln` into one output, and pushes the
+output to `L(n+1)`. Cascading is gradual: each subsequent flush
+re-checks and runs at most one more round, so the writer never
+pays for the entire cascade in a single call. The user-facing
+`compact()` loops until no level holds two or more tables, which
+preserves the v1.x semantics ("collapse to one table per non-empty
+level") while internally using the leveled engine.
+
+```text
+flush     L0 = [t1]
+flush     L0 = [t1, t2]
+flush     L0 = [t1, t2, t3]
+flush     L0 = [t1, t2, t3, t4]   # threshold hit
+auto      L0 = []                  L1 = [t5]
+flush     L0 = [t6]
+... three more flushes ...
+auto      L0 = []                  L1 = [t5, t10]
+auto      L0 = []                  L1 = []         L2 = [t11]
+```
+
+Write amplification per level is roughly the threshold; over `H`
+levels the total amplification is `~T * H = ~4 * log_T(N)`, much
+better than the original `O(N)`.
+
+Tombstone safety
+----------------
+
+`compact_all` no longer drops tombstones unconditionally. It now
+takes a `drop_tombstones: bool` parameter; the engine sets it
+`true` only when no level at or below the target holds any tables
+(otherwise the tombstone in the source is still needed to shadow
+older data physically resident at the target level or beyond).
+
+The property test `arbitrary_ops_match_btreemap_after_reopen`
+caught two bugs in the first cut of this code: an off-by-one in
+the "is the target level the bottom" check, and a within-level
+walk that iterated `L1+` in natural (oldest-first) order rather
+than the newest-first order needed when tables in those levels can
+still overlap by key range. Both are fixed; the property test
+runs sixty-four random operation sequences per `cargo test` and
+hardens any new edits against regression.
+
+Trade-offs that remain
+----------------------
+
+The v1.3 algorithm is **size-tiered** rather than strict leveled:
+tables within a single level can still overlap by key range,
+because each merge produces one output covering the full key
+range it saw. Strict leveled (each L1+ partitioned into
+non-overlapping ranges, merging includes overlapping target-level
+tables) is a v1.4+ milestone. The win for size-tiered is that the
+algorithm and the read path stay simple while the write
+amplification ceiling drops by orders of magnitude.
+
 [compaction]: https://github.com/NicolasDeNigris91/Lattice/blob/main/crates/lattice-core/src/compaction.rs

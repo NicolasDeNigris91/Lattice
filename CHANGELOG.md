@@ -7,6 +7,56 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-04-29
+
+### Added
+- Manifest on-disk format v2 (`version = 2`). The flat
+  `table_seqs: Vec<u64>` becomes `levels: Vec<Vec<u64>>`, one
+  entry per LSM level. Manifests written by v1.0..v1.2 are still
+  readable; `Manifest::load` peeks the version byte and migrates
+  legacy `table_seqs` into `levels[0]`.
+- Size-tiered leveled compaction. Per-level threshold (default 4)
+  triggers a single-round merge of an overfull level into one
+  output pushed to the next level down. Cascading happens
+  gradually across successive flushes, bounding the writer's
+  worst-case latency. The user-facing `compact()` loops until no
+  level holds two or more tables, preserving the v1.x "collapse
+  everything" semantics on top of the new engine.
+- `compact_all` now takes a `drop_tombstones: bool` parameter so
+  the engine can keep tombstones in non-bottom levels (where they
+  still need to shadow data physically resident in target or
+  deeper levels).
+- New `data_survives_cascading_leveled_compaction` integration
+  test covers the L0 -> L1 -> L2 cascade end-to-end.
+- Two new unit tests in `manifest::tests`:
+  `manifest_v2_round_trip_through_disk` and
+  `manifest_v1_on_disk_upgrades_to_v2_with_everything_in_l0`,
+  written test-first.
+- Book chapter 5 ("Compaction") gets a "v1.3: cascading levels"
+  section explaining the new algorithm, the manifest evolution,
+  the tombstone safety check, and the remaining gap to strict
+  leveled.
+
+### Changed
+- `State::all_sstables_newest_first` now walks every level
+  end-to-start (not just L0), because tables within a single L1+
+  level can still overlap by key range under the size-tiered
+  algorithm. The same change applies to `Snapshot::ssts_newest_first`.
+- Internal hard guard `MAX_LEVELS = 7` caps the cascade depth.
+
+### Notes
+- Write amplification drops from `O(N)` (every compaction
+  rewrites the entire dataset) to `~T * log_T(N)` (a level holds
+  at most `T` tables before being pushed down). On the development
+  machine, the existing `sequential_write_*` benches are unchanged
+  by this commit because they do not stress compaction; a
+  dedicated write-amplification bench is recorded as v1.4 work.
+- v1.3 ships **size-tiered** compaction, not strict RocksDB-style
+  leveled (which keeps L1+ partitioned into non-overlapping
+  ranges). Strict leveled and the per-level size knobs
+  (`level_size_multiplier`, `level0_target_bytes`) are tracked as
+  v1.4 milestones.
+
 ## [1.2.0] - 2026-04-29
 
 ### Added
@@ -246,7 +296,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   case to exercise replay.
 - Book chapters 1 (the write ahead log) and 2 (the memtable).
 
-[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.3.0
 [1.2.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.2.0
 [1.1.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.1.0
 [1.0.1]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.0.1
