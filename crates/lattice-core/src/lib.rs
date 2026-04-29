@@ -16,6 +16,7 @@ mod manifest;
 mod memtable;
 mod snapshot;
 mod sstable;
+mod transaction;
 mod wal;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -35,6 +36,7 @@ use crate::manifest::Manifest;
 use crate::memtable::{Lookup, MemTable};
 pub use crate::snapshot::Snapshot;
 use crate::sstable::{SSTableReader, SSTableWriter, SsLookup};
+pub use crate::transaction::Transaction;
 use crate::wal::{LogEntry, Wal};
 
 /// Per-write knobs. Today this is only `durable`; future options
@@ -786,6 +788,30 @@ impl Lattice {
     /// Path to the database directory.
     pub fn path(&self) -> &Path {
         &self.inner.path
+    }
+
+    /// Run a closure inside a snapshot-isolated transaction. Reads
+    /// inside the closure see the database as of the transaction
+    /// start, layered on top of the transaction's own staged
+    /// writes. On `Ok` return, every staged put and delete is
+    /// applied atomically; on `Err` (or panic, or early drop) the
+    /// staged writes are discarded.
+    pub fn transaction<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&mut Transaction<'_>) -> Result<R>,
+    {
+        let mut tx = Transaction::new(self.snapshot());
+        let outcome = f(&mut tx)?;
+        // Apply the staged writes. They go through the regular put
+        // / delete path so the WAL records and the leveled state
+        // both reflect the changes consistently.
+        for (key, value) in &tx.write_set {
+            match value {
+                Some(v) => self.put(key, v)?,
+                None => self.delete(key)?,
+            }
+        }
+        Ok(outcome)
     }
 
     fn maybe_flush(&self) -> Result<()> {
