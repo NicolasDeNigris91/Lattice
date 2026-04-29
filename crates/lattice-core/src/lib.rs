@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+mod bloom;
 mod error;
 mod memtable;
 mod sstable;
@@ -182,9 +183,10 @@ impl Lattice {
         // Write to a temp file so a crash mid-write leaves no
         // half-formed `.sst` for `discover_sstables` to pick up.
         let _ = fs::remove_file(&tmp_path);
+        let entries = self.memtable.drain();
         {
-            let mut writer = SSTableWriter::create(&tmp_path)?;
-            for (key, value) in self.memtable.drain() {
+            let mut writer = SSTableWriter::create(&tmp_path, entries.len())?;
+            for (key, value) in entries {
                 writer.append(key, value)?;
             }
             writer.finish()?;

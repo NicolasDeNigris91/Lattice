@@ -7,6 +7,23 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-29
+
+### Added
+- Per-`SSTable` Bloom filter at ~1% false positive rate (10 bits per
+  key, 7 hash functions via Kirsch-Mitzenmacher double-hashing on a
+  single `xxh3_128` digest).
+- `SSTableReader::get` short-circuits with `Absent` on a negative bloom
+  probe, skipping index lookup, block read, decompression, and scan.
+- `BloomFilter::serialize`/`deserialize` for a fixed wire format
+  embedded in the SSTable file.
+- Book chapter 4 (bloom filters).
+
+### Changed
+- **BREAKING**: `SSTable` format version bumped from 1 to 2. The footer
+  grew from 32 to 48 bytes to hold `bloom_offset` and `bloom_length`.
+  Phase 2 SSTables do not open under Phase 3.
+
 ## [0.2.0] - 2026-04-29
 
 ### Added
@@ -52,6 +69,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   case to exercise replay.
 - Book chapters 1 (the write ahead log) and 2 (the memtable).
 
-[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v0.3.0
 [0.2.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v0.2.0
 [0.1.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v0.1.0

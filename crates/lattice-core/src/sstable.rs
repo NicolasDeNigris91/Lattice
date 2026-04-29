@@ -49,6 +49,7 @@ use std::path::{Path, PathBuf};
 use parking_lot::Mutex;
 use tracing::debug;
 
+use crate::bloom::BloomFilter;
 use crate::error::{Error, Result};
 
 /// One on-disk entry: a key and either a value (put) or `None` (tombstone).
@@ -56,8 +57,8 @@ type Entry = (Vec<u8>, Option<Vec<u8>>);
 
 const BLOCK_TARGET_SIZE: usize = 4 * 1024;
 const MAGIC: u64 = 0x4C41_5454_4943_4530; // "LATTICE0"
-const FORMAT_VERSION: u32 = 1;
-const FOOTER_SIZE: usize = 32;
+const FORMAT_VERSION: u32 = 2;
+const FOOTER_SIZE: usize = 48;
 const FLAG_PUT: u8 = 0;
 const FLAG_TOMBSTONE: u8 = 1;
 
@@ -82,14 +83,15 @@ struct IndexEntry {
 #[derive(Debug)]
 pub(crate) struct SSTableWriter {
     writer: BufWriter<File>,
-    pending: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    pending: Vec<Entry>,
     pending_size: usize,
     index: Vec<IndexEntry>,
     bytes_written: u64,
+    bloom: BloomFilter,
 }
 
 impl SSTableWriter {
-    pub(crate) fn create(path: &Path) -> Result<Self> {
+    pub(crate) fn create(path: &Path, expected_keys: usize) -> Result<Self> {
         let file = OpenOptions::new().create_new(true).write(true).open(path)?;
         Ok(Self {
             writer: BufWriter::new(file),
@@ -97,11 +99,13 @@ impl SSTableWriter {
             pending_size: 0,
             index: Vec::new(),
             bytes_written: 0,
+            bloom: BloomFilter::with_capacity(expected_keys),
         })
     }
 
     /// Append an entry. Caller must supply keys in ascending order.
     pub(crate) fn append(&mut self, key: Vec<u8>, value: Option<Vec<u8>>) -> Result<()> {
+        self.bloom.insert(&key);
         let entry_size = 1 + 4 + key.len() + 4 + value.as_ref().map_or(0, Vec::len);
         self.pending.push((key, value));
         self.pending_size = self.pending_size.saturating_add(entry_size);
@@ -171,10 +175,22 @@ impl SSTableWriter {
         Ok(())
     }
 
-    /// Finish the file: flushes the trailing block, writes the index
-    /// block, writes the footer, and `fsync`s. Consumes self.
+    /// Finish the file: flushes the trailing block, writes the bloom
+    /// filter block, writes the index block, writes the footer, and
+    /// `fsync`s. Consumes self.
     pub(crate) fn finish(mut self) -> Result<()> {
         self.flush_block()?;
+
+        let bloom_bytes = self.bloom.serialize();
+        let bloom_offset = self.bytes_written;
+        self.writer.write_all(&bloom_bytes)?;
+        let bloom_length = u64::try_from(bloom_bytes.len()).map_err(|_| {
+            Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "sstable bloom too large",
+            ))
+        })?;
+        self.bytes_written = self.bytes_written.saturating_add(bloom_length);
 
         let index_offset = self.bytes_written;
         let mut index_buf = Vec::new();
@@ -200,11 +216,13 @@ impl SSTableWriter {
         })?;
 
         let mut footer = [0u8; FOOTER_SIZE];
-        footer[0..8].copy_from_slice(&index_offset.to_le_bytes());
-        footer[8..16].copy_from_slice(&index_length.to_le_bytes());
-        footer[16..24].copy_from_slice(&MAGIC.to_le_bytes());
-        footer[24..28].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
-        // bytes 28..32 are reserved zeros.
+        footer[0..8].copy_from_slice(&bloom_offset.to_le_bytes());
+        footer[8..16].copy_from_slice(&bloom_length.to_le_bytes());
+        footer[16..24].copy_from_slice(&index_offset.to_le_bytes());
+        footer[24..32].copy_from_slice(&index_length.to_le_bytes());
+        footer[32..40].copy_from_slice(&MAGIC.to_le_bytes());
+        footer[40..44].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+        // bytes 44..48 are reserved zeros.
         self.writer.write_all(&footer)?;
         self.writer.flush()?;
         self.writer.get_mut().sync_all()?;
@@ -218,6 +236,7 @@ impl SSTableWriter {
 pub(crate) struct SSTableReader {
     file: Mutex<File>,
     index: Vec<IndexEntry>,
+    bloom: BloomFilter,
     seq: u64,
     path: PathBuf,
 }
@@ -233,16 +252,27 @@ impl SSTableReader {
         file.seek(SeekFrom::Start(file_len - FOOTER_SIZE as u64))?;
         let mut footer = [0u8; FOOTER_SIZE];
         file.read_exact(&mut footer)?;
-        let index_offset = u64::from_le_bytes(footer[0..8].try_into().expect("8"));
-        let index_length = u64::from_le_bytes(footer[8..16].try_into().expect("8"));
-        let magic = u64::from_le_bytes(footer[16..24].try_into().expect("8"));
-        let version = u32::from_le_bytes(footer[24..28].try_into().expect("4"));
+        let bloom_offset = u64::from_le_bytes(footer[0..8].try_into().expect("8"));
+        let bloom_length = u64::from_le_bytes(footer[8..16].try_into().expect("8"));
+        let index_offset = u64::from_le_bytes(footer[16..24].try_into().expect("8"));
+        let index_length = u64::from_le_bytes(footer[24..32].try_into().expect("8"));
+        let magic = u64::from_le_bytes(footer[32..40].try_into().expect("8"));
+        let version = u32::from_le_bytes(footer[40..44].try_into().expect("4"));
         if magic != MAGIC {
             return Err(Error::MalformedSstable("bad magic in footer"));
         }
         if version != FORMAT_VERSION {
             return Err(Error::MalformedSstable("unsupported sstable version"));
         }
+
+        file.seek(SeekFrom::Start(bloom_offset))?;
+        let mut bloom_bytes = vec![
+            0u8;
+            usize::try_from(bloom_length)
+                .map_err(|_| Error::MalformedSstable("bloom too large"))?
+        ];
+        file.read_exact(&mut bloom_bytes)?;
+        let bloom = BloomFilter::deserialize(&bloom_bytes)?;
 
         file.seek(SeekFrom::Start(index_offset))?;
         let mut index_bytes = vec![
@@ -256,6 +286,7 @@ impl SSTableReader {
         Ok(Self {
             file: Mutex::new(file),
             index,
+            bloom,
             seq,
             path: path.to_path_buf(),
         })
@@ -272,6 +303,9 @@ impl SSTableReader {
 
     /// Look up a single key.
     pub(crate) fn get(&self, key: &[u8]) -> Result<SsLookup> {
+        if !self.bloom.might_contain(key) {
+            return Ok(SsLookup::Absent);
+        }
         let Some(entry) = self.candidate_block(key) else {
             return Ok(SsLookup::Absent);
         };
