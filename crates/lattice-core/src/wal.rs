@@ -84,8 +84,20 @@ impl Wal {
         Ok(())
     }
 
-    /// Append a single entry. Returns once the bytes are durable.
+    /// Append a single entry. Returns once the bytes are durable
+    /// (`BufWriter` flushed and the file `fsync`ed).
     pub(crate) fn append(&mut self, entry: &LogEntry) -> Result<()> {
+        self.append_pending(entry)?;
+        self.sync_pending()?;
+        Ok(())
+    }
+
+    /// Append a single entry into the in-memory `BufWriter` only. The
+    /// bytes do not reach the OS until either the buffer fills, a
+    /// later [`Wal::sync_pending`] call, or the next [`Wal::append`].
+    /// Caller is responsible for invoking `sync_pending` (directly or
+    /// via the engine's group commit) before depending on durability.
+    pub(crate) fn append_pending(&mut self, entry: &LogEntry) -> Result<()> {
         let payload = bincode::encode_to_vec(entry, BINCODE_CONFIG)?;
         let len: u32 = u32::try_from(payload.len()).map_err(|_| {
             Error::Io(std::io::Error::new(
@@ -98,10 +110,16 @@ impl Wal {
         self.writer.write_all(&crc.to_le_bytes())?;
         self.writer.write_all(&len.to_le_bytes())?;
         self.writer.write_all(&payload)?;
+
+        debug!(bytes = payload.len() + 8, "wal append (pending)");
+        Ok(())
+    }
+
+    /// Flush the in-memory buffer to the OS and `fsync` the file.
+    /// A no-op when nothing is pending in the `BufWriter`.
+    pub(crate) fn sync_pending(&mut self) -> Result<()> {
         self.writer.flush()?;
         self.writer.get_mut().sync_data()?;
-
-        debug!(bytes = payload.len() + 8, "wal append");
         Ok(())
     }
 

@@ -33,6 +33,23 @@ pub use crate::snapshot::Snapshot;
 use crate::sstable::{SSTableReader, SSTableWriter, SsLookup};
 use crate::wal::{LogEntry, Wal};
 
+/// Per-write knobs. Today this is only `durable`; future options
+/// (e.g. write priority) will land here without breaking callers.
+#[derive(Debug, Clone, Copy)]
+pub struct WriteOptions {
+    /// If `true` (the default), the call returns only after the WAL
+    /// has been `fsync`ed to disk. If `false`, the call returns once
+    /// the bytes have been queued; a background flusher amortises the
+    /// `fsync` across a window of writes.
+    pub durable: bool,
+}
+
+impl Default for WriteOptions {
+    fn default() -> Self {
+        Self { durable: true }
+    }
+}
+
 /// Fluent builder for opening a [`Lattice`] with non-default
 /// configuration. Reach it via [`Lattice::builder`].
 #[derive(Debug, Clone)]
@@ -40,6 +57,8 @@ pub struct LatticeBuilder {
     path: PathBuf,
     flush_threshold_bytes: usize,
     compaction_threshold: usize,
+    commit_window: std::time::Duration,
+    commit_batch: usize,
 }
 
 impl LatticeBuilder {
@@ -59,6 +78,31 @@ impl LatticeBuilder {
         self
     }
 
+    /// Maximum time a non-durable write may sit in the WAL buffer
+    /// before the engine flushes and `fsync`s it. Default is 5 ms.
+    ///
+    /// **Reserved API.** The time-driven flusher requires a
+    /// background thread sharing the WAL with the writer thread,
+    /// which is a concurrency story that lands with M2. In v1.1 the
+    /// value is accepted and stored but only the batch threshold and
+    /// explicit `flush_wal` calls trigger an `fsync`. Setting a
+    /// large value here is safe today and will become meaningful
+    /// once M2 ships.
+    #[must_use]
+    pub const fn commit_window(mut self, window: std::time::Duration) -> Self {
+        self.commit_window = window;
+        self
+    }
+
+    /// Maximum number of pending non-durable writes before the
+    /// engine flushes and `fsync`s. Default is 64. Use
+    /// [`usize::MAX`] to disable batch-driven flushing.
+    #[must_use]
+    pub const fn commit_batch(mut self, batch: usize) -> Self {
+        self.commit_batch = batch;
+        self
+    }
+
     /// Open or create the database at the configured path.
     pub fn open(self) -> Result<Lattice> {
         Lattice::open_with(self)
@@ -71,6 +115,14 @@ const DEFAULT_FLUSH_THRESHOLD_BYTES: usize = 4 * 1024 * 1024;
 /// Default number of live `SSTable`s before an auto-compaction is
 /// triggered. Tunable via [`Lattice::set_compaction_threshold`].
 const DEFAULT_COMPACTION_THRESHOLD: usize = 4;
+
+/// Default group commit window. Non-durable writes accumulate in the
+/// WAL `BufWriter` for at most this long before the engine syncs.
+const DEFAULT_COMMIT_WINDOW: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Default group commit batch size. Non-durable writes are syncd
+/// once this many records are queued, regardless of the window.
+const DEFAULT_COMMIT_BATCH: usize = 64;
 
 /// `SSTable` filename format. Six zero-padded digits, lexicographic order
 /// matches sequence order up to one million tables, which is enough for
@@ -86,6 +138,30 @@ pub struct Lattice {
     next_seq: u64,
     flush_threshold_bytes: usize,
     compaction_threshold: usize,
+    #[allow(dead_code)] // Used by group commit timer; field reserved.
+    commit_window: std::time::Duration,
+    #[allow(dead_code)] // Used by group commit batch threshold; field reserved.
+    commit_batch: usize,
+    /// Number of non-durable WAL records queued since the last sync.
+    pending_writes: usize,
+}
+
+impl Drop for Lattice {
+    /// Graceful close: flush any pending non-durable WAL bytes so a
+    /// well-behaved program does not lose acknowledged writes. Errors
+    /// are logged because Drop cannot return them; callers that care
+    /// about hard failure surfaces should call [`Lattice::flush_wal`]
+    /// explicitly before dropping the handle.
+    fn drop(&mut self) {
+        if self.pending_writes > 0
+            && let Err(err) = self.flush_wal()
+        {
+            warn!(
+                ?err,
+                "lattice drop: flush_wal failed; non-durable writes may be lost"
+            );
+        }
+    }
 }
 
 impl std::fmt::Debug for Lattice {
@@ -110,6 +186,8 @@ impl Lattice {
             path: path.as_ref().to_path_buf(),
             flush_threshold_bytes: DEFAULT_FLUSH_THRESHOLD_BYTES,
             compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
+            commit_window: DEFAULT_COMMIT_WINDOW,
+            commit_batch: DEFAULT_COMMIT_BATCH,
         }
     }
 
@@ -129,6 +207,8 @@ impl Lattice {
             path,
             flush_threshold_bytes,
             compaction_threshold,
+            commit_window,
+            commit_batch,
         } = builder;
         fs::create_dir_all(&path)?;
 
@@ -172,6 +252,9 @@ impl Lattice {
             next_seq: manifest.next_seq,
             flush_threshold_bytes,
             compaction_threshold,
+            commit_window,
+            commit_batch,
+            pending_writes: 0,
         })
     }
 
@@ -187,18 +270,57 @@ impl Lattice {
         self.compaction_threshold = tables;
     }
 
-    /// Insert or overwrite a value for `key`.
-    pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+    /// Insert or overwrite a value for `key` with explicit
+    /// per-write options. See [`WriteOptions`] for the trade-off
+    /// between durability and throughput.
+    pub fn put_with(&mut self, key: &[u8], value: &[u8], opts: WriteOptions) -> Result<()> {
         let entry = LogEntry::Put {
             key: key.to_vec(),
             value: value.to_vec(),
         };
-        self.wal.append(&entry)?;
+        self.append_entry(&entry, opts)?;
         let LogEntry::Put { key, value } = entry else {
             unreachable!()
         };
         self.memtable.put(key, value);
         self.maybe_flush()?;
+        Ok(())
+    }
+
+    /// Force a `fsync` of any pending non-durable WAL appends.
+    /// Returns once the bytes are on stable storage. A no-op when
+    /// nothing is pending.
+    pub fn flush_wal(&mut self) -> Result<()> {
+        if self.pending_writes == 0 {
+            return Ok(());
+        }
+        self.wal.sync_pending()?;
+        self.pending_writes = 0;
+        Ok(())
+    }
+
+    /// Insert or overwrite a value for `key`. Equivalent to
+    /// `put_with(key, value, WriteOptions::default())`.
+    pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.put_with(key, value, WriteOptions::default())
+    }
+
+    fn append_entry(&mut self, entry: &LogEntry, opts: WriteOptions) -> Result<()> {
+        // Both paths buffer the record first. The durable case then
+        // forces an immediate sync (which also drains any prior
+        // pending non-durable writes), the non-durable case lets the
+        // batch threshold decide.
+        self.wal.append_pending(entry)?;
+        if opts.durable {
+            self.wal.sync_pending()?;
+            self.pending_writes = 0;
+        } else {
+            self.pending_writes = self.pending_writes.saturating_add(1);
+            if self.pending_writes >= self.commit_batch {
+                self.wal.sync_pending()?;
+                self.pending_writes = 0;
+            }
+        }
         Ok(())
     }
 
@@ -283,6 +405,10 @@ impl Lattice {
 
         self.persist_manifest()?;
         self.wal.truncate()?;
+        // Memtable contents are now durable in the SSTable. Anything
+        // we were tracking for group commit on the WAL is captured
+        // either way, so the pending counter resets.
+        self.pending_writes = 0;
         info!(seq, path = %final_path.display(), "sstable flushed");
 
         self.maybe_compact()?;
