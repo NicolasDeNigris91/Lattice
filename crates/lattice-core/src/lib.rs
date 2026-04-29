@@ -22,9 +22,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use parking_lot::{Mutex, RwLock};
 use tracing::{info, warn};
@@ -158,19 +159,27 @@ struct Inner {
     mutation_lock: Mutex<()>,
     flush_threshold_bytes: usize,
     compaction_threshold: usize,
-    #[allow(dead_code)] // Wired to the background flusher in M2.3.
-    commit_window: Duration,
     commit_batch: usize,
+    /// Set to `true` to ask the background flusher to stop. The
+    /// thread also exits if `Weak::upgrade` returns `None`.
+    flusher_stop: AtomicBool,
+    /// Join handle for the background flusher; taken on Drop. Stored
+    /// behind a `Mutex<Option<_>>` so it can be installed after the
+    /// `Arc<Inner>` exists.
+    flusher_join: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Drop for Inner {
-    /// Last-handle close. Flush any pending non-durable WAL bytes so
-    /// well-behaved programs do not lose acknowledged writes. Errors
-    /// are logged because Drop cannot return them; callers that care
-    /// about hard failure surfaces should call
-    /// [`Lattice::flush_wal`] explicitly before the last clone goes
-    /// away.
+    /// Last-handle close. Stop the background flusher, then flush
+    /// any pending non-durable WAL bytes so well-behaved programs
+    /// do not lose acknowledged writes. Errors are logged because
+    /// Drop cannot return them.
     fn drop(&mut self) {
+        self.flusher_stop.store(true, Ordering::Release);
+        if let Some(join) = self.flusher_join.get_mut().take() {
+            join.thread().unpark();
+            let _ = join.join();
+        }
         if self.pending_writes.load(Ordering::Acquire) > 0
             && let Err(err) = self.wal.get_mut().sync_pending()
         {
@@ -179,6 +188,49 @@ impl Drop for Inner {
                 "lattice drop: flush_wal failed; non-durable writes may be lost"
             );
         }
+    }
+}
+
+/// Background flusher loop body. Lives as a free function so it can
+/// hold a `Weak<Inner>` and exit cleanly when the last `Arc<Inner>`
+/// goes away (the upgrade returns `None`). The `Weak` is taken by
+/// value because the closure passed to `thread::spawn` must own its
+/// captures.
+#[allow(clippy::needless_pass_by_value)]
+fn flusher_loop(weak: Weak<Inner>, window: Duration) {
+    let mut last_sync = Instant::now();
+    loop {
+        let elapsed = last_sync.elapsed();
+        let to_sleep = window.saturating_sub(elapsed).max(Duration::from_millis(1));
+        thread::park_timeout(to_sleep);
+
+        let Some(inner) = weak.upgrade() else {
+            break;
+        };
+        if inner.flusher_stop.load(Ordering::Acquire) {
+            break;
+        }
+
+        let elapsed = last_sync.elapsed();
+        if elapsed >= window && inner.pending_writes.load(Ordering::Acquire) > 0 {
+            {
+                let mut wal = inner.wal.lock();
+                match wal.sync_pending() {
+                    Ok(()) => {
+                        inner.pending_writes.store(0, Ordering::Release);
+                    }
+                    Err(err) => {
+                        warn!(?err, "background flusher: sync_pending failed");
+                    }
+                }
+            }
+            // Reset on success and on failure to back off; failures
+            // already logged.
+            last_sync = Instant::now();
+        }
+        // Drop the upgraded Arc here so Inner can be dropped if its
+        // last clone goes away while we sleep next iteration.
+        drop(inner);
     }
 }
 
@@ -285,20 +337,32 @@ impl Lattice {
             next_seq: manifest.next_seq,
         });
 
-        Ok(Self {
-            inner: Arc::new(Inner {
-                path,
-                active: RwLock::new(active),
-                state: RwLock::new(state),
-                wal: Mutex::new(wal),
-                pending_writes: AtomicUsize::new(0),
-                mutation_lock: Mutex::new(()),
-                flush_threshold_bytes,
-                compaction_threshold,
-                commit_window,
-                commit_batch,
-            }),
-        })
+        let inner = Arc::new(Inner {
+            path,
+            active: RwLock::new(active),
+            state: RwLock::new(state),
+            wal: Mutex::new(wal),
+            pending_writes: AtomicUsize::new(0),
+            mutation_lock: Mutex::new(()),
+            flush_threshold_bytes,
+            compaction_threshold,
+            commit_batch,
+            flusher_stop: AtomicBool::new(false),
+            flusher_join: Mutex::new(None),
+        });
+
+        // Spawn the background flusher. It holds a `Weak<Inner>` so
+        // it does not keep the engine alive on its own, and exits on
+        // either `flusher_stop = true` or the last strong `Arc`
+        // dropping.
+        let weak = Arc::downgrade(&inner);
+        let join = thread::Builder::new()
+            .name("lattice-flusher".into())
+            .spawn(move || flusher_loop(weak, commit_window))
+            .expect("spawn lattice-flusher thread");
+        *inner.flusher_join.lock() = Some(join);
+
+        Ok(Self { inner })
     }
 
     /// Insert or overwrite a value for `key` with explicit per-write

@@ -121,3 +121,35 @@ fn commit_batch_threshold_makes_non_durable_durable_without_flush_wal() {
         );
     }
 }
+
+#[test]
+fn background_flusher_syncs_within_commit_window() {
+    // With a small commit_window and the batch threshold disabled,
+    // the engine's background flusher must sync the WAL on its own
+    // schedule. Sleeping past the window then mem::forget'ing the
+    // handle (which skips Drop) leaves the bytes on disk only if
+    // the timer thread actually fired. The test therefore proves
+    // that the timer is wired and honours its setting.
+    let dir = tempdir().unwrap();
+    let db = Lattice::builder(dir.path())
+        .commit_window(std::time::Duration::from_millis(20))
+        .commit_batch(usize::MAX)
+        .open()
+        .unwrap();
+
+    db.put_with(b"k", b"v", WriteOptions { durable: false })
+        .unwrap();
+
+    // Generously past the window so the flusher gets at least one
+    // tick on a busy CI machine.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    std::mem::forget(db);
+
+    let db = Lattice::open(dir.path()).unwrap();
+    assert_eq!(
+        db.get(b"k").unwrap(),
+        Some(b"v".to_vec()),
+        "background flusher should have synced the put within commit_window"
+    );
+}
