@@ -33,6 +33,38 @@ pub use crate::snapshot::Snapshot;
 use crate::sstable::{SSTableReader, SSTableWriter, SsLookup};
 use crate::wal::{LogEntry, Wal};
 
+/// Fluent builder for opening a [`Lattice`] with non-default
+/// configuration. Reach it via [`Lattice::builder`].
+#[derive(Debug, Clone)]
+pub struct LatticeBuilder {
+    path: PathBuf,
+    flush_threshold_bytes: usize,
+    compaction_threshold: usize,
+}
+
+impl LatticeBuilder {
+    /// Set the in-memory size at which the memtable auto-flushes to a
+    /// new on-disk `SSTable`. Default is 4 MiB.
+    #[must_use]
+    pub const fn flush_threshold_bytes(mut self, bytes: usize) -> Self {
+        self.flush_threshold_bytes = bytes;
+        self
+    }
+
+    /// Set the number of live `SSTable`s that triggers an
+    /// auto-compaction. Default is 4. Use [`usize::MAX`] to disable.
+    #[must_use]
+    pub const fn compaction_threshold(mut self, tables: usize) -> Self {
+        self.compaction_threshold = tables;
+        self
+    }
+
+    /// Open or create the database at the configured path.
+    pub fn open(self) -> Result<Lattice> {
+        Lattice::open_with(self)
+    }
+}
+
 /// Default memtable size (in bytes) before an auto-flush is triggered.
 const DEFAULT_FLUSH_THRESHOLD_BYTES: usize = 4 * 1024 * 1024;
 
@@ -70,14 +102,34 @@ impl std::fmt::Debug for Lattice {
 }
 
 impl Lattice {
-    /// Open or create a database in the given directory.
+    /// Start a fluent builder for opening a database at `path`. Use
+    /// the returned [`LatticeBuilder`] to override defaults, then
+    /// finish with [`LatticeBuilder::open`].
+    pub fn builder(path: impl AsRef<Path>) -> LatticeBuilder {
+        LatticeBuilder {
+            path: path.as_ref().to_path_buf(),
+            flush_threshold_bytes: DEFAULT_FLUSH_THRESHOLD_BYTES,
+            compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
+        }
+    }
+
+    /// Open or create a database at `path` with all defaults.
+    /// Equivalent to `Lattice::builder(path).open()`.
     ///
     /// Creates the directory if absent. Loads the manifest (or
     /// bootstraps one), opens the listed `SSTable`s, deletes any orphan
     /// `*.sst` files left over from a crash mid-compaction, then
     /// replays the write-ahead log.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref().to_path_buf();
+        Self::builder(path).open()
+    }
+
+    fn open_with(builder: LatticeBuilder) -> Result<Self> {
+        let LatticeBuilder {
+            path,
+            flush_threshold_bytes,
+            compaction_threshold,
+        } = builder;
         fs::create_dir_all(&path)?;
 
         let manifest = match Manifest::load(&path)? {
@@ -118,8 +170,8 @@ impl Lattice {
             wal,
             sstables,
             next_seq: manifest.next_seq,
-            flush_threshold_bytes: DEFAULT_FLUSH_THRESHOLD_BYTES,
-            compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
+            flush_threshold_bytes,
+            compaction_threshold,
         })
     }
 

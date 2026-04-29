@@ -157,3 +157,37 @@ fn many_keys_persist_in_order() {
         );
     }
 }
+
+#[test]
+fn builder_configures_flush_threshold() {
+    // The builder path with a 1 KiB flush threshold must trigger an
+    // auto-flush after a few small puts, leaving the WAL truncated and
+    // the data resident in an SSTable. Pins the documented surface of
+    // `Lattice::builder(path).flush_threshold_bytes(n).open()`.
+    let dir = tempdir().unwrap();
+    let mut db = Lattice::builder(dir.path())
+        .flush_threshold_bytes(1024)
+        .compaction_threshold(usize::MAX)
+        .open()
+        .unwrap();
+
+    for i in 0u32..32 {
+        db.put(&i.to_be_bytes(), &[b'x'; 64]).unwrap();
+    }
+
+    let sst_count = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|x| x == "sst"))
+        .count();
+    assert!(
+        sst_count >= 1,
+        "auto-flush should have produced at least one sstable"
+    );
+
+    // Default `Lattice::open` must remain a working shorthand for the
+    // builder with defaults: reopening reads back what we wrote.
+    drop(db);
+    let db = Lattice::open(dir.path()).unwrap();
+    assert_eq!(db.get(&0u32.to_be_bytes()).unwrap(), Some(vec![b'x'; 64]));
+}
