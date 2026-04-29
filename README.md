@@ -1,0 +1,52 @@
+# Lattice
+
+An LSM-tree key-value storage engine, written from scratch in Rust.
+
+Lattice is built for learning and portfolio purposes. It implements the
+fundamental components of modern log-structured merge-tree databases (write
+ahead log, memtable, sorted string tables, bloom filters, compaction,
+snapshots) without depending on any existing storage library. The companion
+book documents every design decision in plain language.
+
+* Crate: [`lattice-core`](crates/lattice-core)
+* CLI: [`lattice-cli`](crates/lattice-cli)
+* Book: https://lattice.nicolaspilegidenigris.dev
+
+## Status
+
+Pre-release. See the [project roadmap](#roadmap) below.
+
+## Quickstart
+
+```bash
+# Library
+cargo add lattice-core
+
+# CLI
+cargo install lattice-cli
+
+lattice put hello world
+lattice get hello
+lattice scan --prefix h
+```
+
+## Roadmap
+
+| Tag    | Milestone                                              |
+|--------|--------------------------------------------------------|
+| v0.1   | WAL plus MemTable, durable replay                      |
+| v0.2   | SSTable flush, mixed read path                         |
+| v0.3   | Bloom filters per SSTable                              |
+| v0.4   | Tiered compaction with manifest                        |
+| v1.0   | Snapshots, benchmarks against `sled`, book finished    |
+
+## Why another KV store
+
+Lattice is not a serious alternative to [`sled`](https://github.com/spacejam/sled),
+[`fjall`](https://github.com/fjall-rs/fjall), or RocksDB. Its purpose is to
+reproduce the building blocks of those systems with code small enough to read
+end to end, and prose explaining each decision.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

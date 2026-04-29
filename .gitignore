@@ -1,0 +1,34 @@
+# Build artifacts
+target/
+**/*.rs.bk
+*.pdb
+
+# Cargo
+Cargo.lock.bak
+
+# mdBook build output
+book/book/
+
+# Lattice runtime data (tests and demos may write here)
+data/
+*.lattice/
+*.wal
+*.sst
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Coverage and benches output
+*.profraw
+tarpaulin-report.html
+coverage/
+
+# Local AI scratch files (not committed by policy)
+CLAUDE.md
+.claude/
+.aider*
