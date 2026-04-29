@@ -10,7 +10,10 @@ permissions:
 
 jobs:
   publish-crate:
-    name: cargo publish (lattice-core)
+    name: cargo publish
+    # Pre-1.0 tags ship only as GitHub releases. crates.io publication
+    # is reserved for stable releases per the project roadmap.
+    if: ${{ !startsWith(github.ref_name, 'v0.') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

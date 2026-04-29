@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0-dev"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -19,7 +19,7 @@ categories = ["database-implementations", "data-structures"]
 
 [workspace.dependencies]
 # Internal
-lattice-core = { path = "crates/lattice-core", version = "0.1.0-dev" }
+lattice-core = { path = "crates/lattice-core", version = "0.1.0" }
 
 # Serialization and binary formats
 serde = { version = "1.0", features = ["derive"] }
@@ -62,11 +62,15 @@ unused_macro_rules = "warn"
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
-# Pragmatic relaxations for a single-author project
+# Pragmatic relaxations for a single-author project.
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+# `redundant_pub_crate` (nursery) and rustc's `unreachable_pub` are in
+# direct conflict on items inside private modules. We keep `pub(crate)`
+# because it states intent more clearly, and silence the nursery lint.
+redundant_pub_crate = "allow"
 
 [profile.release]
 opt-level = 3
