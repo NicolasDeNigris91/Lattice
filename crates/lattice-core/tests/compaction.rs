@@ -226,6 +226,36 @@ fn open_cleans_orphans_left_by_a_simulated_post_compact_crash() {
 }
 
 #[test]
+fn data_survives_cascading_leveled_compaction() {
+    // With `compaction_threshold = 2`, every other flush triggers
+    // an auto-compaction. Sixteen flushes therefore cascade through
+    // several levels (L0 -> L1 -> L2 -> ...). The explicit
+    // `compact()` at the end forces every level to collapse to a
+    // single table, exercising the user-facing semantics. Every
+    // key must remain readable across the cascade.
+    let dir = tempdir().unwrap();
+    let db = Lattice::builder(dir.path())
+        .compaction_threshold(2)
+        .open()
+        .unwrap();
+
+    for i in 0u32..16 {
+        db.put(&i.to_be_bytes(), format!("v{i}").as_bytes())
+            .unwrap();
+        db.flush().unwrap();
+    }
+    db.compact().unwrap();
+
+    for i in 0u32..16 {
+        assert_eq!(
+            db.get(&i.to_be_bytes()).unwrap(),
+            Some(format!("v{i}").into_bytes()),
+            "key {i} missing after cascading compaction"
+        );
+    }
+}
+
+#[test]
 fn many_flushes_then_compact_preserves_all_keys() {
     let dir = tempdir().unwrap();
     let db = Lattice::builder(dir.path())

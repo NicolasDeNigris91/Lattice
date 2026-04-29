@@ -116,9 +116,16 @@ impl LatticeBuilder {
 /// Default memtable size (in bytes) before an auto-flush is triggered.
 const DEFAULT_FLUSH_THRESHOLD_BYTES: usize = 4 * 1024 * 1024;
 
-/// Default number of live `SSTable`s before an auto-compaction is
-/// triggered. Tunable via [`LatticeBuilder::compaction_threshold`].
+/// Default number of `SSTable`s in a single level before an
+/// auto-compaction is triggered for that level. Tunable via
+/// [`LatticeBuilder::compaction_threshold`].
 const DEFAULT_COMPACTION_THRESHOLD: usize = 4;
+
+/// Maximum LSM level depth. The leveled algorithm stops cascading
+/// once it reaches this depth; in practice the dataset would have
+/// to be petabytes for this to fire on the default fan-out, but
+/// the guard prevents unbounded recursion in pathological tests.
+const MAX_LEVELS: usize = 7;
 
 /// Default group commit window. Non-durable writes accumulate in the
 /// WAL `BufWriter` for at most this long before the engine syncs.
@@ -150,21 +157,16 @@ pub(crate) struct State {
 }
 
 impl State {
-    /// Iterate every live `SSTable`, newest first. L0 is walked
-    /// end-to-start (last push = newest); L1 onward is walked in
-    /// natural order because each level is internally
-    /// non-overlapping. Used by `get` and `scan` to produce
-    /// last-writer-wins semantics.
+    /// Iterate every live `SSTable`, newest first. Each level is
+    /// walked end-to-start so the most recently installed table in
+    /// the level wins under last-writer-wins. L0 is the freshest
+    /// level overall, then L1, then L2, etc. The size-tiered
+    /// algorithm in v1.3 still produces overlapping tables within
+    /// L1+, so the reverse walk inside every level is load-bearing.
     pub(crate) fn all_sstables_newest_first(
         &self,
     ) -> impl Iterator<Item = &Arc<SSTableReader>> + '_ {
-        let l0 = self
-            .levels
-            .first()
-            .into_iter()
-            .flat_map(|l0| l0.iter().rev());
-        let lower = self.levels.iter().skip(1).flat_map(|level| level.iter());
-        l0.chain(lower)
+        self.levels.iter().flat_map(|level| level.iter().rev())
     }
 
     /// Total number of live `SSTable`s across every level. Used by
@@ -622,67 +624,109 @@ impl Lattice {
         self.maybe_compact()
     }
 
-    /// Run a compaction across every live `SSTable`, replacing them
-    /// with a single merged table that drops tombstones. No-op if
-    /// there are fewer than two tables.
+    /// Run leveled compaction until no level holds more than one
+    /// `SSTable`. Each round picks the shallowest level above the
+    /// per-level threshold (or any level above two tables, when the
+    /// caller forces a full compaction), merges every table in that
+    /// level into a single output, and pushes the output to the
+    /// next level down.
     ///
-    /// Phase 2 of M3 keeps the legacy "merge everything to one
-    /// table" algorithm; the leveled algorithm lands in phase 3.
-    /// The merged result goes back into L0 for now.
+    /// Behaviour mirrors v1.0..v1.2's "merge everything" semantics
+    /// from the user's point of view: after `compact()` the database
+    /// has at most one `SSTable` per non-empty level. Internally the
+    /// algorithm only rewrites one level's bytes per round, so write
+    /// amplification scales with the number of levels (~`log_T(N)`)
+    /// rather than the total dataset size.
     pub fn compact(&self) -> Result<()> {
+        loop {
+            let target = {
+                let state = self.inner.state.read();
+                state
+                    .levels
+                    .iter()
+                    .position(|level| level.len() >= 2)
+                    .filter(|&idx| idx + 1 < MAX_LEVELS)
+            };
+            match target {
+                Some(idx) => self.compact_level(idx)?,
+                None => break,
+            }
+        }
+        Ok(())
+    }
+
+    /// Compact every `SSTable` in `level_idx` into a single table
+    /// pushed to `level_idx + 1`. Internal helper used by both the
+    /// auto-compaction trigger and the user-facing `compact()`.
+    fn compact_level(&self, level_idx: usize) -> Result<()> {
         let _mutation_guard = self.inner.mutation_lock.lock();
 
-        // Snapshot every live reader across every level under a
-        // brief read. Order is oldest first (L1 onward in level
-        // order, then L0 in insertion order) because `compact_all`
-        // is a last-writer-wins merge: later inputs override
-        // earlier ones, and "later" here means "newer in the LSM".
-        let (old_readers, new_seq) = {
+        // Snapshot the source level. Sources are taken in insertion
+        // order (oldest first) because `compact_all` is a
+        // last-writer-wins merge that needs newer inputs later.
+        // We also check whether the target level (level_idx + 1) is
+        // the bottom of the LSM right now: if no deeper level has
+        // any tables, tombstones in the merged output have nothing
+        // older to shadow and are safe to drop.
+        let (sources, new_seq, drop_tombstones) = {
             let state = self.inner.state.read();
-            if state.total_sstables() < 2 {
+            let Some(level) = state.levels.get(level_idx) else {
+                return Ok(());
+            };
+            if level.len() < 2 {
                 return Ok(());
             }
-            let mut flat: Vec<Arc<SSTableReader>> = Vec::with_capacity(state.total_sstables());
-            for level in state.levels.iter().skip(1) {
-                flat.extend(level.iter().cloned());
-            }
-            if let Some(l0) = state.levels.first() {
-                flat.extend(l0.iter().cloned());
-            }
-            (flat, state.next_seq)
+            let target_level = level_idx + 1;
+            // Tombstones in the source can shadow data physically
+            // resident in the target level (we do not yet merge with
+            // target-level tables) or in any deeper level. Drop them
+            // only when no level at or below target holds any
+            // tables; otherwise keep them so reads still see the
+            // delete.
+            let drop_tombstones = state.levels.iter().skip(target_level).all(Vec::is_empty);
+            (level.clone(), state.next_seq, drop_tombstones)
         };
 
-        // I/O outside the state lock so reads keep flowing.
+        // I/O outside any state lock.
         let final_path = sstable_path(&self.inner.path, new_seq);
         let tmp_path = self
             .inner
             .path
             .join(format!("{new_seq:0SSTABLE_DIGITS$}.sst.tmp"));
         let _ = fs::remove_file(&tmp_path);
-        let readers: Vec<&SSTableReader> = old_readers.iter().map(Arc::as_ref).collect();
-        compaction::compact_all(&readers, &tmp_path)?;
+        let readers: Vec<&SSTableReader> = sources.iter().map(Arc::as_ref).collect();
+        compaction::compact_all(&readers, &tmp_path, drop_tombstones)?;
         drop(readers);
         fs::rename(&tmp_path, &final_path)?;
         sync_dir(&self.inner.path)?;
         let new_reader = Arc::new(SSTableReader::open(&final_path, new_seq)?);
 
-        let old_seqs: Vec<u64> = old_readers.iter().map(|r| r.seq()).collect();
+        let old_seqs: Vec<u64> = sources.iter().map(|r| r.seq()).collect();
 
-        // Install: replace every level with a single L0 entry, bump
-        // next_seq, leave `frozen` alone (a flush in flight is
-        // independent of compaction).
+        // Install: empty the source level, push the merged output to
+        // the next level down (creating that level if needed).
+        // `frozen` and other levels are unchanged.
         {
             let mut state_g = self.inner.state.write();
+            let mut new_levels = state_g.levels.clone();
+            if level_idx >= new_levels.len() {
+                return Ok(());
+            }
+            new_levels[level_idx] = Vec::new();
+            while new_levels.len() <= level_idx + 1 {
+                new_levels.push(Vec::new());
+            }
+            new_levels[level_idx + 1].push(new_reader);
             *state_g = Arc::new(State {
                 frozen: state_g.frozen.clone(),
-                levels: vec![vec![new_reader]],
+                levels: new_levels,
                 next_seq: new_seq + 1,
             });
         }
-        // Drop our local clones of the old `Arc<SSTableReader>`s so
-        // that on POSIX the file removals below actually unlink
-        // (snapshots that still hold them keep the inode alive).
-        drop(old_readers);
+        // Drop our local clones so the file removals below can
+        // unlink on POSIX (snapshots still holding them keep the
+        // inode alive, which is fine).
+        drop(sources);
 
         self.persist_manifest()?;
 
@@ -696,7 +740,12 @@ impl Lattice {
                 );
             }
         }
-        info!(new_seq, "compaction complete");
+        info!(
+            from_level = level_idx,
+            to_level = level_idx + 1,
+            new_seq,
+            "level compacted"
+        );
         Ok(())
     }
 
@@ -748,9 +797,21 @@ impl Lattice {
     }
 
     fn maybe_compact(&self) -> Result<()> {
-        let count = self.inner.state.read().total_sstables();
-        if count >= self.inner.compaction_threshold {
-            self.compact()?;
+        // Auto-compaction picks the shallowest level above the
+        // per-level threshold and runs one round. Cascading happens
+        // gradually: each subsequent flush re-checks and runs the
+        // next round if the cascade overflowed. This keeps the
+        // writer's worst-case latency bounded by a single round.
+        let target = {
+            let state = self.inner.state.read();
+            state
+                .levels
+                .iter()
+                .position(|level| level.len() >= self.inner.compaction_threshold)
+                .filter(|&idx| idx + 1 < MAX_LEVELS)
+        };
+        if let Some(idx) = target {
+            self.compact_level(idx)?;
         }
         Ok(())
     }

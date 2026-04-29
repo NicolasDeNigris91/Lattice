@@ -32,16 +32,11 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    /// Iterate every captured `SSTable`, newest first. Same ordering
-    /// rule as the live engine.
+    /// Iterate every captured `SSTable`, newest first. Each level
+    /// is walked end-to-start so the most recently installed table
+    /// wins under last-writer-wins.
     fn ssts_newest_first(&self) -> impl Iterator<Item = &Arc<SSTableReader>> + '_ {
-        let l0 = self
-            .levels
-            .first()
-            .into_iter()
-            .flat_map(|l0| l0.iter().rev());
-        let lower = self.levels.iter().skip(1).flat_map(|level| level.iter());
-        l0.chain(lower)
+        self.levels.iter().flat_map(|level| level.iter().rev())
     }
 
     /// Read the value of `key` as it existed when the snapshot was
