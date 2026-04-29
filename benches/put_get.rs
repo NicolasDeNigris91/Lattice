@@ -1,14 +1,110 @@
 //! Throughput benchmarks for `lattice-core`.
 //!
-//! Real benchmarks land alongside Phase 5. This stub exists so the bench
-//! target declared in `crates/lattice-core/Cargo.toml` builds cleanly from
-//! day one.
+//! Run with `cargo bench -p lattice-core`. Reports land at
+//! `target/criterion/report/index.html`.
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
-fn bench_placeholder(c: &mut Criterion) {
-    c.bench_function("placeholder", |b| b.iter(|| 1u64 + 1u64));
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use lattice_core::Lattice;
+use tempfile::TempDir;
+
+const N: usize = 10_000;
+
+const fn key(i: usize) -> [u8; 8] {
+    (i as u64).to_be_bytes()
 }
 
-criterion_group!(benches, bench_placeholder);
+fn fresh_db() -> (TempDir, Lattice) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
+    (dir, db)
+}
+
+/// `N` sequential puts on a fresh database.
+fn bench_sequential_write(c: &mut Criterion) {
+    c.bench_function("sequential_write_10k", |b| {
+        b.iter_batched(
+            fresh_db,
+            |(dir, mut db)| {
+                for i in 0..N {
+                    db.put(&key(i), b"value-bytes").unwrap();
+                }
+                drop(db);
+                drop(dir);
+            },
+            BatchSize::PerIteration,
+        );
+    });
+}
+
+/// `N` random reads against a database with `N` keys, all hits.
+fn bench_random_read_hits(c: &mut Criterion) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = Lattice::open(dir.path()).unwrap();
+    for i in 0..N {
+        db.put(&key(i), b"value-bytes").unwrap();
+    }
+    db.flush().unwrap();
+
+    c.bench_function("random_read_hits_10k", |b| {
+        b.iter(|| {
+            // Pseudo-random walk through the keyspace using a fixed
+            // prime stride so probes do not hit the same page run.
+            let mut i = 0usize;
+            for _ in 0..N {
+                i = (i + 7919) % N;
+                let v = db.get(&key(i)).unwrap();
+                black_box(v);
+            }
+        });
+    });
+}
+
+/// `N` reads against a database with `N` keys, every probe is a miss.
+/// Measures the bloom filter short-circuit on the read path.
+fn bench_random_read_misses(c: &mut Criterion) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = Lattice::open(dir.path()).unwrap();
+    for i in 0..N {
+        db.put(&key(i), b"value-bytes").unwrap();
+    }
+    db.flush().unwrap();
+
+    c.bench_function("random_read_misses_10k", |b| {
+        b.iter(|| {
+            let mut i = N; // all keys here are above the populated range
+            for _ in 0..N {
+                i = i.saturating_add(1);
+                let v = db.get(&key(i)).unwrap();
+                black_box(v);
+            }
+        });
+    });
+}
+
+/// Full scan of a database with `N` keys.
+fn bench_scan_all(c: &mut Criterion) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = Lattice::open(dir.path()).unwrap();
+    for i in 0..N {
+        db.put(&key(i), b"value-bytes").unwrap();
+    }
+    db.flush().unwrap();
+
+    c.bench_function("scan_all_10k", |b| {
+        b.iter(|| {
+            let pairs = db.scan(None).unwrap();
+            black_box(pairs);
+        });
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_sequential_write,
+    bench_random_read_hits,
+    bench_random_read_misses,
+    bench_scan_all,
+);
 criterion_main!(benches);

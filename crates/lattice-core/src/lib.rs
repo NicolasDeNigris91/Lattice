@@ -14,18 +14,21 @@ mod compaction;
 mod error;
 mod manifest;
 mod memtable;
+mod snapshot;
 mod sstable;
 mod wal;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tracing::{info, warn};
 
 pub use crate::error::{Error, Result};
 use crate::manifest::Manifest;
 use crate::memtable::{Lookup, MemTable};
+pub use crate::snapshot::Snapshot;
 use crate::sstable::{SSTableReader, SSTableWriter, SsLookup};
 use crate::wal::{LogEntry, Wal};
 
@@ -46,7 +49,7 @@ pub struct Lattice {
     path: PathBuf,
     memtable: MemTable,
     wal: Wal,
-    sstables: Vec<SSTableReader>,
+    sstables: Vec<Arc<SSTableReader>>,
     next_seq: u64,
     flush_threshold_bytes: usize,
     compaction_threshold: usize,
@@ -86,7 +89,10 @@ impl Lattice {
 
         let mut sstables = Vec::with_capacity(live.len());
         for seq in &manifest.table_seqs {
-            sstables.push(SSTableReader::open(&sstable_path(&path, *seq), *seq)?);
+            sstables.push(Arc::new(SSTableReader::open(
+                &sstable_path(&path, *seq),
+                *seq,
+            )?));
         }
 
         let wal_path = path.join("wal.log");
@@ -217,7 +223,7 @@ impl Lattice {
         }
         fs::rename(&tmp_path, &final_path)?;
 
-        let reader = SSTableReader::open(&final_path, seq)?;
+        let reader = Arc::new(SSTableReader::open(&final_path, seq)?);
         self.sstables.push(reader);
         self.next_seq = self.next_seq.saturating_add(1);
 
@@ -243,14 +249,18 @@ impl Lattice {
             .join(format!("{new_seq:0SSTABLE_DIGITS$}.sst.tmp"));
         let _ = fs::remove_file(&tmp_path);
 
-        compaction::compact_all(&self.sstables, &tmp_path)?;
+        let readers: Vec<&SSTableReader> = self.sstables.iter().map(Arc::as_ref).collect();
+        compaction::compact_all(&readers, &tmp_path)?;
+        drop(readers);
         fs::rename(&tmp_path, &final_path)?;
-        let new_reader = SSTableReader::open(&final_path, new_seq)?;
+        let new_reader = Arc::new(SSTableReader::open(&final_path, new_seq)?);
 
-        let old_seqs: Vec<u64> = self.sstables.iter().map(SSTableReader::seq).collect();
+        let old_seqs: Vec<u64> = self.sstables.iter().map(|r| r.seq()).collect();
         // Replace readers in memory before persisting the manifest, so
         // that a panic between rename and save still leaves the engine
-        // in-memory state consistent with the on-disk new file.
+        // in-memory state consistent with the on-disk new file. Any
+        // outstanding `Snapshot` keeps the old `Arc<SSTableReader>`s
+        // alive; that is intentional.
         self.sstables.clear();
         self.sstables.push(new_reader);
         self.next_seq = self.next_seq.saturating_add(1);
@@ -259,11 +269,27 @@ impl Lattice {
         for seq in old_seqs {
             let path = sstable_path(&self.path, seq);
             if let Err(err) = fs::remove_file(&path) {
-                warn!(?err, path = %path.display(), "could not delete old sstable");
+                warn!(
+                    ?err,
+                    path = %path.display(),
+                    "could not delete old sstable (likely held by a live Snapshot on Windows; cleaned up on next open)"
+                );
             }
         }
         info!(new_seq, "compaction complete");
         Ok(())
+    }
+
+    /// Open a read-only point-in-time view of the database.
+    ///
+    /// The snapshot sees the exact set of live keys at the time of the
+    /// call. Subsequent `put`, `delete`, `flush`, and `compact` calls
+    /// on the parent do not change what the snapshot sees.
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            memtable: self.memtable.clone(),
+            sstables: self.sstables.clone(),
+        }
     }
 
     /// Path to the database directory.
@@ -289,7 +315,7 @@ impl Lattice {
         let manifest = Manifest {
             version: 1,
             next_seq: self.next_seq,
-            table_seqs: self.sstables.iter().map(SSTableReader::seq).collect(),
+            table_seqs: self.sstables.iter().map(|r| r.seq()).collect(),
         };
         manifest.save(&self.path)
     }

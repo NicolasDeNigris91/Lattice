@@ -7,6 +7,32 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-04-29
+
+### Added
+- `Lattice::snapshot()` returns a read-only point-in-time view that
+  ignores subsequent puts, deletes, flushes, and compactions on the
+  parent.
+- `Snapshot::get` and `Snapshot::scan` mirror the `Lattice` read path
+  on a frozen memtable clone plus `Arc<SSTableReader>` references.
+- `Snapshot` is `Clone + Send`, can be shipped across threads.
+- Real Criterion benchmarks: `sequential_write_10k`,
+  `random_read_hits_10k`, `random_read_misses_10k`, `scan_all_10k`.
+- Book chapters 6 (snapshots), 7 (benchmarks with measured numbers),
+  and 8 (what is not yet implemented).
+
+### Changed
+- `Lattice.sstables` is now `Vec<Arc<SSTableReader>>` so snapshots can
+  share open handles with the engine without duplicating any state.
+- `compaction::compact_all` now takes `&[&SSTableReader]`.
+- `MemTable` derives `Clone` to enable snapshot creation.
+
+### Known limitations
+- A live `Snapshot` on Windows can prevent compaction from immediately
+  deleting the obsolete `.sst` files, since the snapshot keeps the
+  file handles open. The orphan sweep on next `Lattice::open` reclaims
+  the disk. POSIX systems are not affected.
+
 ## [0.4.0] - 2026-04-29
 
 ### Added
@@ -92,7 +118,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   case to exercise replay.
 - Book chapters 1 (the write ahead log) and 2 (the memtable).
 
-[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.0.0
 [0.4.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v0.4.0
 [0.3.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v0.3.0
 [0.2.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v0.2.0

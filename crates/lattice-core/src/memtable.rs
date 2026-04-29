@@ -24,7 +24,7 @@ pub(crate) enum Lookup<'a> {
 
 /// Sorted in-memory map from key to optional value, where `None` is a
 /// tombstone.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct MemTable {
     inner: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     /// Approximate live byte size, used to drive auto-flush.

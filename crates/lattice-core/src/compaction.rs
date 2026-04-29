@@ -16,7 +16,7 @@ use crate::sstable::{SSTableReader, SSTableWriter};
 
 /// Merge every entry from `readers` (in oldest-to-newest order) into a
 /// single new `SSTable` written at `output`. Tombstones are dropped.
-pub(crate) fn compact_all(readers: &[SSTableReader], output: &Path) -> Result<usize> {
+pub(crate) fn compact_all(readers: &[&SSTableReader], output: &Path) -> Result<usize> {
     let mut accumulator: BTreeMap<Vec<u8>, Option<Vec<u8>>> = BTreeMap::new();
 
     for reader in readers {
