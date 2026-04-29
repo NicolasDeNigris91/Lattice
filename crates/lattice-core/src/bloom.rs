@@ -78,14 +78,14 @@ impl BloomFilter {
     /// Decode from bytes produced by [`BloomFilter::serialize`].
     pub(crate) fn deserialize(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < 12 {
-            return Err(Error::MalformedSstable("bloom header truncated"));
+            return Err(Error::MalformedFormat("bloom header truncated"));
         }
         let num_bits = u64::from_le_bytes(bytes[0..8].try_into().expect("8"));
         let num_hashes = u32::from_le_bytes(bytes[8..12].try_into().expect("4"));
         let num_words = (num_bits / 64) as usize;
         let words_bytes = &bytes[12..];
         if words_bytes.len() != num_words * 8 {
-            return Err(Error::MalformedSstable("bloom bits truncated"));
+            return Err(Error::MalformedFormat("bloom bits truncated"));
         }
         let mut bits = Vec::with_capacity(num_words);
         for chunk in words_bytes.chunks_exact(8) {

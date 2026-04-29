@@ -246,7 +246,7 @@ impl SSTableReader {
         let mut file = File::open(path)?;
         let file_len = file.metadata()?.len();
         if file_len < FOOTER_SIZE as u64 {
-            return Err(Error::MalformedSstable("file shorter than footer"));
+            return Err(Error::MalformedFormat("file shorter than footer"));
         }
 
         file.seek(SeekFrom::Start(file_len - FOOTER_SIZE as u64))?;
@@ -259,17 +259,17 @@ impl SSTableReader {
         let magic = u64::from_le_bytes(footer[32..40].try_into().expect("8"));
         let version = u32::from_le_bytes(footer[40..44].try_into().expect("4"));
         if magic != MAGIC {
-            return Err(Error::MalformedSstable("bad magic in footer"));
+            return Err(Error::MalformedFormat("bad magic in footer"));
         }
         if version != FORMAT_VERSION {
-            return Err(Error::MalformedSstable("unsupported sstable version"));
+            return Err(Error::MalformedFormat("unsupported sstable version"));
         }
 
         file.seek(SeekFrom::Start(bloom_offset))?;
         let mut bloom_bytes = vec![
             0u8;
             usize::try_from(bloom_length)
-                .map_err(|_| Error::MalformedSstable("bloom too large"))?
+                .map_err(|_| Error::MalformedFormat("bloom too large"))?
         ];
         file.read_exact(&mut bloom_bytes)?;
         let bloom = BloomFilter::deserialize(&bloom_bytes)?;
@@ -278,7 +278,7 @@ impl SSTableReader {
         let mut index_bytes = vec![
             0u8;
             usize::try_from(index_length)
-                .map_err(|_| Error::MalformedSstable("index too large"))?
+                .map_err(|_| Error::MalformedFormat("index too large"))?
         ];
         file.read_exact(&mut index_bytes)?;
         let index = parse_index(&index_bytes)?;
@@ -373,12 +373,12 @@ fn parse_index(bytes: &[u8]) -> Result<Vec<IndexEntry>> {
         cursor += 4;
         let key_end = cursor + key_len as usize;
         if key_end > bytes.len() {
-            return Err(Error::MalformedSstable("index key truncated"));
+            return Err(Error::MalformedFormat("index key truncated"));
         }
         let first_key = bytes[cursor..key_end].to_vec();
         cursor = key_end;
         if cursor + 8 + 4 + 4 > bytes.len() {
-            return Err(Error::MalformedSstable("index trailer truncated"));
+            return Err(Error::MalformedFormat("index trailer truncated"));
         }
         let offset = u64::from_le_bytes(bytes[cursor..cursor + 8].try_into().expect("8"));
         cursor += 8;
@@ -401,7 +401,7 @@ fn parse_block(bytes: &[u8]) -> Result<Vec<Entry>> {
     let mut cursor = 0usize;
     while cursor < bytes.len() {
         if cursor + 1 > bytes.len() {
-            return Err(Error::MalformedSstable("block flags truncated"));
+            return Err(Error::MalformedFormat("block flags truncated"));
         }
         let flags = bytes[cursor];
         cursor += 1;
@@ -409,7 +409,7 @@ fn parse_block(bytes: &[u8]) -> Result<Vec<Entry>> {
         cursor += 4;
         let key_end = cursor + key_len as usize;
         if key_end > bytes.len() {
-            return Err(Error::MalformedSstable("block key truncated"));
+            return Err(Error::MalformedFormat("block key truncated"));
         }
         let key = bytes[cursor..key_end].to_vec();
         cursor = key_end;
@@ -417,14 +417,14 @@ fn parse_block(bytes: &[u8]) -> Result<Vec<Entry>> {
         cursor += 4;
         let value_end = cursor + value_len as usize;
         if value_end > bytes.len() {
-            return Err(Error::MalformedSstable("block value truncated"));
+            return Err(Error::MalformedFormat("block value truncated"));
         }
         let value = if flags == FLAG_TOMBSTONE {
             None
         } else if flags == FLAG_PUT {
             Some(bytes[cursor..value_end].to_vec())
         } else {
-            return Err(Error::MalformedSstable("unknown block entry flags"));
+            return Err(Error::MalformedFormat("unknown block entry flags"));
         };
         cursor = value_end;
         out.push((key, value));
@@ -435,7 +435,7 @@ fn parse_block(bytes: &[u8]) -> Result<Vec<Entry>> {
 fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32> {
     let end = offset + 4;
     if end > bytes.len() {
-        return Err(Error::MalformedSstable("u32 truncated"));
+        return Err(Error::MalformedFormat("u32 truncated"));
     }
     Ok(u32::from_le_bytes(
         bytes[offset..end].try_into().expect("4 bytes"),

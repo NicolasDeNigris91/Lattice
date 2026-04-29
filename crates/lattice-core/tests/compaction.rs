@@ -159,6 +159,69 @@ fn compact_with_one_sstable_is_noop() {
 }
 
 #[test]
+fn open_cleans_orphans_left_by_a_simulated_post_compact_crash() {
+    // Reproduces "compaction wrote the manifest pointing at the new
+    // SSTable but crashed before deleting the old SSTables". We build
+    // three SSTables via flush, then hand-roll a manifest that
+    // references only the middle one, then reopen. The orphan sweep
+    // must delete the unreferenced files and leave the live one
+    // intact and readable.
+    use std::path::Path;
+
+    /// Mirrors `crate::manifest::Manifest`. Bincode encodes structs
+    /// by field order, so as long as the field order matches we get
+    /// a byte-for-byte compatible payload without exposing the real
+    /// type publicly.
+    #[derive(bincode::Encode)]
+    struct ManifestShape {
+        version: u32,
+        next_seq: u64,
+        table_seqs: Vec<u64>,
+    }
+
+    fn write_manifest(dir: &Path, version: u32, next_seq: u64, table_seqs: Vec<u64>) {
+        let payload = ManifestShape {
+            version,
+            next_seq,
+            table_seqs,
+        };
+        let bytes = bincode::encode_to_vec(payload, bincode::config::standard()).unwrap();
+        fs::write(dir.join("MANIFEST"), bytes).unwrap();
+    }
+
+    let dir = tempdir().unwrap();
+    {
+        let mut db = Lattice::open(dir.path()).unwrap();
+        db.set_compaction_threshold(usize::MAX);
+        db.put(b"alpha", b"1").unwrap();
+        db.flush().unwrap();
+        db.put(b"beta", b"2").unwrap();
+        db.flush().unwrap();
+        db.put(b"gamma", b"3").unwrap();
+        db.flush().unwrap();
+    }
+    assert_eq!(count_sst_files(dir.path()), 3);
+
+    // Hand-roll a manifest that pretends a compact-then-crash
+    // happened: only seq 2 is live; 1 and 3 are orphans.
+    write_manifest(dir.path(), 1, 4, vec![2]);
+
+    let db = Lattice::open(dir.path()).unwrap();
+
+    assert_eq!(
+        count_sst_files(dir.path()),
+        1,
+        "orphans should have been swept on open"
+    );
+    assert!(dir.path().join("000002.sst").is_file());
+
+    // The live SSTable's contents must still resolve. Note: keys that
+    // were only in the deleted SSTables are now gone; that is the
+    // simulated "post-compact" state, and is not a regression.
+    assert_eq!(db.get(b"beta").unwrap(), Some(b"2".to_vec()));
+}
+
+#[test]
 fn many_flushes_then_compact_preserves_all_keys() {
     let dir = tempdir().unwrap();
     let mut db = Lattice::open(dir.path()).unwrap();

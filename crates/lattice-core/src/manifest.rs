@@ -46,7 +46,7 @@ impl Manifest {
         file.read_to_end(&mut buf)?;
         let (manifest, _consumed) = bincode::decode_from_slice::<Self, _>(&buf, BINCODE_CONFIG)?;
         if manifest.version != MANIFEST_VERSION {
-            return Err(Error::MalformedSstable("unsupported manifest version"));
+            return Err(Error::MalformedFormat("unsupported manifest version"));
         }
         Ok(Some(manifest))
     }
@@ -66,6 +66,7 @@ impl Manifest {
             file.sync_data()?;
         }
         fs::rename(&tmp_path, &final_path)?;
+        crate::sync_dir(dir)?;
         Ok(())
     }
 }

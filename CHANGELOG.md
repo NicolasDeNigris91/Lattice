@@ -7,6 +7,43 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-04-29
+
+### Added
+- Directory `fsync` after every rename that publishes a new on-disk
+  file (manifest save, SSTable flush, SSTable compaction). Required on
+  POSIX so the rename is durable across power loss; no-op on Windows
+  where rename atomicity covers the dirent.
+- Two new tests:
+  - `snapshot_serves_multi_block_reads_after_files_unlinked` pins the
+    contract that an `Arc<SSTableReader>` keeps a file readable on
+    POSIX even after compaction unlinks the dirent.
+  - `open_cleans_orphans_left_by_a_simulated_post_compact_crash`
+    hand-rolls a manifest that references one SSTable while two more
+    sit on disk, asserting the orphan sweep runs.
+- `deploy/Dockerfile` and `deploy/Caddyfile` plus `railway.json` to
+  build and serve the book on Railway as
+  `lattice.nicolaspilegidenigris.dev`.
+- `DEPLOY.md` documenting Railway and crates.io setup.
+
+### Changed
+- `Error::MalformedSstable` renamed to `Error::MalformedFormat`
+  because it is also surfaced for malformed manifests. **Breaking**
+  for anyone already depending on this variant by name (no published
+  consumers).
+- `bench_sequential_write` now returns the temp directory from the
+  measured closure so its recursive removal happens after the timer
+  stops, removing teardown noise from the reported number.
+- `release.yml` skips `cargo publish` cleanly when
+  `CARGO_REGISTRY_TOKEN` is absent on the repository, logging a
+  warning instead of failing the workflow.
+
+### Documentation
+- Chapter 3 now describes the v2 SSTable layout (with bloom block and
+  48-byte footer) and forward-references the Phase 3 evolution. The
+  stale "we do not yet clean tmp files" line is replaced by an
+  accurate reference to Phase 4's orphan sweep.
+
 ## [1.0.0] - 2026-04-29
 
 ### Added
@@ -118,7 +155,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   case to exercise replay.
 - Book chapters 1 (the write ahead log) and 2 (the memtable).
 
-[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.0.1
 [1.0.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.0.0
 [0.4.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v0.4.0
 [0.3.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v0.3.0

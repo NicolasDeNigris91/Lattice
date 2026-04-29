@@ -21,7 +21,9 @@ fn fresh_db() -> (TempDir, Lattice) {
     (dir, db)
 }
 
-/// `N` sequential puts on a fresh database.
+/// `N` sequential puts on a fresh database. The temp directory is
+/// kept by the closure return so its (slow on Windows) recursive
+/// removal happens outside the timed routine.
 fn bench_sequential_write(c: &mut Criterion) {
     c.bench_function("sequential_write_10k", |b| {
         b.iter_batched(
@@ -30,8 +32,9 @@ fn bench_sequential_write(c: &mut Criterion) {
                 for i in 0..N {
                     db.put(&key(i), b"value-bytes").unwrap();
                 }
-                drop(db);
-                drop(dir);
+                // Return both so Criterion drops them after stopping
+                // the wall-clock timer, not inside the measurement.
+                (dir, db)
             },
             BatchSize::PerIteration,
         );

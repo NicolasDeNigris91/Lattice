@@ -44,6 +44,11 @@ lattice compact
 | v0.4.0 | Tiered compaction with manifest                        |
 | v1.0.0 | Snapshots, criterion benches, finished book            |
 
+## Deployment
+
+The book and the crate can both be published from this repository.
+See [DEPLOY.md](DEPLOY.md) for the Railway and `crates.io` setup.
+
 ## Why another KV store
 
 Lattice is not a serious alternative to [`sled`](https://github.com/spacejam/sled),

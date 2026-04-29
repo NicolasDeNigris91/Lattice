@@ -22,8 +22,9 @@ pub enum Error {
     #[error("decompress error: {0}")]
     Decompress(#[from] lz4_flex::block::DecompressError),
 
-    /// An `SSTable` file is missing required structure (footer, magic,
-    /// supported format version, well-formed index).
-    #[error("malformed sstable: {0}")]
-    MalformedSstable(&'static str),
+    /// An on-disk file is missing required structure (footer, magic,
+    /// supported format version, well-formed index, well-formed
+    /// manifest).
+    #[error("malformed format: {0}")]
+    MalformedFormat(&'static str),
 }

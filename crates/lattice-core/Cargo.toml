@@ -30,6 +30,7 @@ tracing = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 criterion = { workspace = true }
+bincode = { workspace = true }
 
 [[bench]]
 name = "put_get"

@@ -23,6 +23,12 @@ file every flush.
 
 ## File layout
 
+The shape below is the v2 on-disk layout used by the released code.
+Phase 3 (chapter 4) introduced the bloom block; the original v1
+layout shipped in this phase had no bloom and a 32-byte footer. The
+diagram is updated so the rest of the book agrees with what `cargo
+doc` and the source actually do.
+
 ```text
 +------------------------------+
 | data block 0  (lz4 compressed)|
@@ -30,17 +36,19 @@ file every flush.
 |              ...              |
 | data block N  (lz4 compressed)|
 +------------------------------+
+| bloom filter block            |   <- added in Phase 3
++------------------------------+
 | index block (uncompressed)    |
 +------------------------------+
-| footer (32 bytes)             |
+| footer (48 bytes)             |
 +------------------------------+
 ```
 
 Data blocks come first because they dominate the file size. The index
-sits at the end so a writer that streams data blocks knows their offsets
-and lengths only after it has written them all. The footer is a fixed 32
-bytes, so the reader can compute its position from the file size with no
-hunting.
+sits at the end so a writer that streams data blocks knows their
+offsets and lengths only after it has written them all. The footer is
+a fixed 48 bytes, so the reader can compute its position from the
+file size with no hunting.
 
 ### A data block
 
@@ -76,15 +84,17 @@ the worst case.
 ### The footer
 
 ```text
-| index_offset: u64 | index_length: u64 | magic: u64 | version: u32 | reserved: u32 |
+| bloom_offset: u64 | bloom_length: u64 | index_offset: u64 | index_length: u64 | magic: u64 | version: u32 | reserved: u32 |
 ```
 
 The magic is `0x4C415454_49434530` ("LATTICE0" in big-endian, stored
-little-endian on disk). The version is `1`. A reader that opens a file
-with a wrong magic, or a future version it does not understand, refuses
-to load it instead of guessing. The four reserved bytes exist to give
-us room to add fields in version `2` without changing the offset of any
-existing field.
+little-endian on disk). The version is `2`. A reader that opens a
+file with a wrong magic, or a future version it does not understand,
+refuses to load it instead of guessing. The four reserved bytes exist
+to give us room to add fields in version `3` without changing the
+offset of any existing field. The `bloom_offset` and `bloom_length`
+slots are zero-initialised in v1 files (which the released engine no
+longer reads).
 
 ## The flush procedure
 
@@ -110,10 +120,11 @@ up in the SSTable plus the memtable, but the read path consults the
 memtable first, so the answer is the same.
 
 If a crash happens between steps 3 and 4, the partial `.sst.tmp` is
-visible on disk but the SSTable list does not include it. The
-`discover_sstables` function on `open` only picks up files matching
-`{seq}.sst`, so the tmp file is ignored. A future cleanup pass can
-delete it. We do not do that yet.
+visible on disk but the SSTable list does not include it. Phase 4
+(chapter 5) introduces an explicit cleanup pass on `open` that
+removes any leftover `*.sst.tmp` and any `*.sst` whose sequence
+number is absent from the manifest. The released code does this; the
+"future" qualifier is gone.
 
 ## The mixed read path
 

@@ -20,6 +20,7 @@ mod wal;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -222,6 +223,7 @@ impl Lattice {
             writer.finish()?;
         }
         fs::rename(&tmp_path, &final_path)?;
+        sync_dir(&self.path)?;
 
         let reader = Arc::new(SSTableReader::open(&final_path, seq)?);
         self.sstables.push(reader);
@@ -253,6 +255,7 @@ impl Lattice {
         compaction::compact_all(&readers, &tmp_path)?;
         drop(readers);
         fs::rename(&tmp_path, &final_path)?;
+        sync_dir(&self.path)?;
         let new_reader = Arc::new(SSTableReader::open(&final_path, new_seq)?);
 
         let old_seqs: Vec<u64> = self.sstables.iter().map(|r| r.seq()).collect();
@@ -323,6 +326,21 @@ impl Lattice {
 
 fn sstable_path(dir: &Path, seq: u64) -> PathBuf {
     dir.join(format!("{seq:0SSTABLE_DIGITS$}.sst"))
+}
+
+/// `fsync` the directory entry. Required on POSIX for a `rename` to be
+/// durable across power loss; on Windows the rename atomicity already
+/// covers the dirent and opening a directory as a file is not
+/// supported, so this is a no-op.
+#[cfg(unix)]
+pub(crate) fn sync_dir(dir: &Path) -> io::Result<()> {
+    fs::File::open(dir)?.sync_all()
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps, clippy::missing_const_for_fn)]
+pub(crate) fn sync_dir(_dir: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 /// Bootstrap a manifest by scanning the directory for existing
