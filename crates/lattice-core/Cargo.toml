@@ -15,6 +15,16 @@ categories.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+# Adds `AsyncLattice`, a thin wrapper that runs the synchronous engine
+# on tokio's blocking pool via `spawn_blocking`. Honest about being
+# "async-friendly" rather than "natively async": locks and file I/O
+# remain synchronous under the hood. Native async (replacing
+# parking_lot and std::fs with their tokio equivalents) is a v2.x
+# milestone.
+tokio = ["dep:tokio", "tokio/rt"]
+
 [dependencies]
 serde = { workspace = true }
 bincode = { workspace = true }
@@ -25,12 +35,14 @@ lz4_flex = { workspace = true }
 parking_lot = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }
 criterion = { workspace = true }
 bincode = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [[bench]]
 name = "put_get"

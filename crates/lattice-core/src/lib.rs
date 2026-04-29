@@ -9,6 +9,8 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "tokio")]
+mod async_api;
 mod bloom;
 mod compaction;
 mod error;
@@ -18,6 +20,9 @@ mod snapshot;
 mod sstable;
 mod transaction;
 mod wal;
+
+#[cfg(feature = "tokio")]
+pub use crate::async_api::AsyncLattice;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
