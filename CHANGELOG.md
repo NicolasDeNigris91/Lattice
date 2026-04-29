@@ -7,6 +7,45 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-04-29
+
+### Added
+- `WriteOptions { durable: bool }` and `Lattice::put_with(k, v, opts)`
+  for opt-in amortised durability. The default remains "every write
+  is `fsync`ed on return", so `db.put(k, v)` keeps its v1.0.x
+  semantics. Non-durable writes coalesce in the WAL `BufWriter`
+  until the configured `commit_batch` threshold (default 64), an
+  explicit `flush_wal` call, or a graceful drop.
+- `Lattice::flush_wal()` to checkpoint pending non-durable writes
+  on demand. Also called from `Drop` so a normal close loses
+  nothing.
+- `LatticeBuilder` (reach via `Lattice::builder(path)`) with
+  `flush_threshold_bytes`, `compaction_threshold`, `commit_window`,
+  and `commit_batch` setters and a consuming `open()`.
+  `Lattice::open(path)` is now a shorthand for
+  `Lattice::builder(path).open()` and remains source-compatible.
+- `bench_sequential_write_amortized_10k` criterion benchmark next to
+  the existing `sequential_write_10k`. On the development machine the
+  pair shows ten seconds versus a hundred and sixty milliseconds for
+  ten thousand puts (~62x speedup).
+- New integration test `builder_configures_flush_threshold` and
+  six contract tests in `tests/group_commit.rs` written test-first.
+- Dual license: the workspace is now `MIT OR Apache-2.0`. New
+  `LICENSE-APACHE` (canonical Apache 2.0 text). The previous
+  `LICENSE` was renamed to `LICENSE-MIT`.
+
+### Changed
+- Book chapter 1 ("the write ahead log") gains a "Group commit (v1.1)"
+  section explaining the new path and the trade-off that the
+  honesty test pins.
+
+### Notes
+- `LatticeBuilder::commit_window` is reserved API: the value is
+  accepted and stored but not yet honoured, because the timer needs a
+  background thread that lands cleanly with M2's concurrency rework.
+  Setting a large duration here is safe today and will become
+  meaningful once M2 ships.
+
 ## [1.0.1] - 2026-04-29
 
 ### Added
@@ -155,7 +194,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   case to exercise replay.
 - Book chapters 1 (the write ahead log) and 2 (the memtable).
 
-[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.1.0
 [1.0.1]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.0.1
 [1.0.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.0.0
 [0.4.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v0.4.0

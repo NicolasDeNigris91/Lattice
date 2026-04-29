@@ -15,9 +15,10 @@ design decision in plain language.
 
 ## Status
 
-v1.0.0. Five phases shipped, sixty plus tests across integration and
-property suites, full mdBook published alongside the code. See the
-[CHANGELOG](CHANGELOG.md) for what each tag delivered.
+v1.1.0. Five didactic phases plus durability hardening (v1.0.1) and
+opt-in group commit (v1.1.0). Fifty plus tests across integration,
+property, and contract suites, full mdBook published alongside the
+code. See the [CHANGELOG](CHANGELOG.md) for what each tag delivered.
 
 ## Quickstart
 
@@ -43,6 +44,8 @@ lattice compact
 | v0.3.0 | Bloom filters per SSTable                              |
 | v0.4.0 | Tiered compaction with manifest                        |
 | v1.0.0 | Snapshots, criterion benches, finished book            |
+| v1.0.1 | Directory `fsync` on rename + Railway/crates.io deploy |
+| v1.1.0 | `WriteOptions`, group commit, dual MIT/Apache-2.0      |
 
 ## Deployment
 

@@ -6,7 +6,7 @@
 use std::hint::black_box;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use lattice_core::Lattice;
+use lattice_core::{Lattice, WriteOptions};
 use tempfile::TempDir;
 
 const N: usize = 10_000;
@@ -34,6 +34,31 @@ fn bench_sequential_write(c: &mut Criterion) {
                 }
                 // Return both so Criterion drops them after stopping
                 // the wall-clock timer, not inside the measurement.
+                (dir, db)
+            },
+            BatchSize::PerIteration,
+        );
+    });
+}
+
+/// `N` sequential puts using `put_with(.., WriteOptions { durable:
+/// false })`. Same workload as `sequential_write_10k` but the WAL
+/// `fsync` is amortised across the batch threshold instead of being
+/// paid per call. The pair makes the M1 group commit speedup
+/// measurable in `cargo bench`.
+fn bench_sequential_write_amortized(c: &mut Criterion) {
+    c.bench_function("sequential_write_amortized_10k", |b| {
+        b.iter_batched(
+            fresh_db,
+            |(dir, mut db)| {
+                let opts = WriteOptions { durable: false };
+                for i in 0..N {
+                    db.put_with(&key(i), b"value-bytes", opts).unwrap();
+                }
+                // Force the final sync so the measured cost includes
+                // the durability commitment, not just the buffered
+                // writes.
+                db.flush_wal().unwrap();
                 (dir, db)
             },
             BatchSize::PerIteration,
@@ -106,6 +131,7 @@ fn bench_scan_all(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_sequential_write,
+    bench_sequential_write_amortized,
     bench_random_read_hits,
     bench_random_read_misses,
     bench_scan_all,
