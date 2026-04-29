@@ -67,6 +67,11 @@ impl MemTable {
         self.inner.is_empty()
     }
 
+    /// Number of entries (live values plus tombstones).
+    pub(crate) fn len(&self) -> usize {
+        self.inner.len()
+    }
+
     /// Approximate memtable footprint in bytes. Counts key plus value
     /// bytes, ignores `BTreeMap` overhead. Good enough for flush
     /// scheduling.
@@ -77,12 +82,5 @@ impl MemTable {
     /// Iterate every entry, including tombstones, in key order.
     pub(crate) fn iter_all(&self) -> impl Iterator<Item = (&[u8], Option<&[u8]>)> {
         self.inner.iter().map(|(k, v)| (k.as_slice(), v.as_deref()))
-    }
-
-    /// Drain self into a sorted vector of `(key, optional value)` pairs,
-    /// suitable for streaming into an `SSTableWriter`.
-    pub(crate) fn drain(&mut self) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
-        self.bytes = 0;
-        std::mem::take(&mut self.inner).into_iter().collect()
     }
 }

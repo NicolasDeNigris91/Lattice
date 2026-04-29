@@ -6,7 +6,7 @@ use tempfile::tempdir;
 #[test]
 fn snapshot_sees_state_at_creation() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
     db.put(b"a", b"1").unwrap();
     db.put(b"b", b"2").unwrap();
 
@@ -27,7 +27,7 @@ fn snapshot_sees_state_at_creation() {
 #[test]
 fn snapshot_keeps_deleted_value_visible() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
     db.put(b"k", b"v").unwrap();
 
     let snap = db.snapshot();
@@ -40,7 +40,7 @@ fn snapshot_keeps_deleted_value_visible() {
 #[test]
 fn snapshot_survives_flush() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
     db.put(b"a", b"1").unwrap();
     db.put(b"b", b"2").unwrap();
 
@@ -55,7 +55,7 @@ fn snapshot_survives_flush() {
 #[test]
 fn snapshot_survives_compaction() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
     db.put(b"a", b"1").unwrap();
     db.flush().unwrap();
     db.put(b"b", b"2").unwrap();
@@ -80,7 +80,7 @@ fn snapshot_survives_compaction() {
 #[test]
 fn snapshot_scan_returns_frozen_pairs() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
     db.put(b"apple", b"red").unwrap();
     db.put(b"banana", b"yellow").unwrap();
 
@@ -101,7 +101,7 @@ fn snapshot_scan_returns_frozen_pairs() {
 #[test]
 fn multiple_snapshots_are_independent() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
     db.put(b"k", b"v1").unwrap();
 
     let s1 = db.snapshot();
@@ -124,7 +124,7 @@ fn snapshot_serves_multi_block_reads_after_files_unlinked() {
     // that reader holds the file open, and on POSIX the inode lives
     // until the last fd closes. Pins the contract under file removal.
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
 
     // ~64 KiB of payload per block fills well past the 4 KiB target.
     let large_value = vec![b'x'; 256];
@@ -162,7 +162,7 @@ fn snapshot_serves_multi_block_reads_after_files_unlinked() {
 #[test]
 fn snapshot_can_be_cloned() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
     db.put(b"k", b"v").unwrap();
 
     let s1 = db.snapshot();

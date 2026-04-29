@@ -17,7 +17,7 @@ fn count_sst_files(dir: &std::path::Path) -> usize {
 #[test]
 fn explicit_flush_is_callable() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
     db.put(b"k", b"v").unwrap();
     db.flush().unwrap();
 }
@@ -25,7 +25,7 @@ fn explicit_flush_is_callable() {
 #[test]
 fn flush_creates_sstable_and_truncates_wal() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
 
     db.put(b"k", b"v").unwrap();
     let wal_size_before = fs::metadata(dir.path().join("wal.log")).unwrap().len();
@@ -44,7 +44,7 @@ fn flush_creates_sstable_and_truncates_wal() {
 #[test]
 fn data_readable_after_flush_in_same_session() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
     db.put(b"a", b"1").unwrap();
     db.put(b"b", b"2").unwrap();
 
@@ -59,7 +59,7 @@ fn data_readable_after_flush_in_same_session() {
 fn data_persists_through_flush_and_reopen() {
     let dir = tempdir().unwrap();
     {
-        let mut db = Lattice::open(dir.path()).unwrap();
+        let db = Lattice::open(dir.path()).unwrap();
         for i in 0u32..50 {
             db.put(&i.to_be_bytes(), format!("value-{i}").as_bytes())
                 .unwrap();
@@ -83,7 +83,7 @@ fn tombstone_in_memtable_shadows_older_sstable() {
     // collapsed "tombstoned here" with "absent here", the read path would
     // fall through and return the old SSTable value.
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
 
     db.put(b"k", b"old").unwrap();
     db.flush().unwrap(); // k=old now lives in SSTable
@@ -95,7 +95,7 @@ fn tombstone_in_memtable_shadows_older_sstable() {
 #[test]
 fn newer_value_in_memtable_overrides_sstable() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
 
     db.put(b"k", b"v1").unwrap();
     db.flush().unwrap();
@@ -107,7 +107,7 @@ fn newer_value_in_memtable_overrides_sstable() {
 #[test]
 fn newer_sstable_overrides_older_sstable() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
 
     db.put(b"k", b"v1").unwrap();
     db.flush().unwrap();
@@ -121,7 +121,7 @@ fn newer_sstable_overrides_older_sstable() {
 #[test]
 fn scan_merges_memtable_and_sstables_with_newest_winning() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
 
     // First SSTable: a=1, b=2
     db.put(b"a", b"1").unwrap();
@@ -151,7 +151,7 @@ fn scan_merges_memtable_and_sstables_with_newest_winning() {
 #[test]
 fn scan_with_prefix_across_layers() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
 
     db.put(b"user:1", b"alice").unwrap();
     db.put(b"product:1", b"book").unwrap();
@@ -172,7 +172,7 @@ fn scan_with_prefix_across_layers() {
 fn many_keys_across_multiple_flushes() {
     let dir = tempdir().unwrap();
     {
-        let mut db = Lattice::open(dir.path()).unwrap();
+        let db = Lattice::open(dir.path()).unwrap();
         // Three batches of 200 keys each, flushed separately.
         for batch in 0u32..3 {
             for i in 0u32..200 {

@@ -66,7 +66,7 @@ proptest! {
 
         // First session: apply every operation, then drop the Lattice.
         {
-            let mut db = Lattice::open(dir.path()).unwrap();
+            let db = Lattice::open(dir.path()).unwrap();
             for op in &ops {
                 match op {
                     Op::Put(k, v) => {

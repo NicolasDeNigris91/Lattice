@@ -23,7 +23,10 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
+use parking_lot::{Mutex, RwLock};
 use tracing::{info, warn};
 
 pub use crate::error::{Error, Result};
@@ -39,8 +42,9 @@ use crate::wal::{LogEntry, Wal};
 pub struct WriteOptions {
     /// If `true` (the default), the call returns only after the WAL
     /// has been `fsync`ed to disk. If `false`, the call returns once
-    /// the bytes have been queued; a background flusher amortises the
-    /// `fsync` across a window of writes.
+    /// the bytes have been queued; the engine amortises the `fsync`
+    /// across a window of writes (see [`LatticeBuilder::commit_batch`]
+    /// and [`LatticeBuilder::commit_window`]).
     pub durable: bool,
 }
 
@@ -57,7 +61,7 @@ pub struct LatticeBuilder {
     path: PathBuf,
     flush_threshold_bytes: usize,
     compaction_threshold: usize,
-    commit_window: std::time::Duration,
+    commit_window: Duration,
     commit_batch: usize,
 }
 
@@ -82,14 +86,13 @@ impl LatticeBuilder {
     /// before the engine flushes and `fsync`s it. Default is 5 ms.
     ///
     /// **Reserved API.** The time-driven flusher requires a
-    /// background thread sharing the WAL with the writer thread,
-    /// which is a concurrency story that lands with M2. In v1.1 the
-    /// value is accepted and stored but only the batch threshold and
-    /// explicit `flush_wal` calls trigger an `fsync`. Setting a
-    /// large value here is safe today and will become meaningful
-    /// once M2 ships.
+    /// background thread that lands with M2.3. In v1.2 the value is
+    /// accepted and stored but only the batch threshold and explicit
+    /// [`Lattice::flush_wal`] calls trigger an `fsync`. Setting a
+    /// large value here is safe and will become meaningful when the
+    /// timer thread arrives.
     #[must_use]
-    pub const fn commit_window(mut self, window: std::time::Duration) -> Self {
+    pub const fn commit_window(mut self, window: Duration) -> Self {
         self.commit_window = window;
         self
     }
@@ -118,7 +121,7 @@ const DEFAULT_COMPACTION_THRESHOLD: usize = 4;
 
 /// Default group commit window. Non-durable writes accumulate in the
 /// WAL `BufWriter` for at most this long before the engine syncs.
-const DEFAULT_COMMIT_WINDOW: std::time::Duration = std::time::Duration::from_millis(5);
+const DEFAULT_COMMIT_WINDOW: Duration = Duration::from_millis(5);
 
 /// Default group commit batch size. Non-durable writes are syncd
 /// once this many records are queued, regardless of the window.
@@ -129,32 +132,47 @@ const DEFAULT_COMMIT_BATCH: usize = 64;
 /// any realistic Phase 4 workload.
 const SSTABLE_DIGITS: usize = 6;
 
-/// An open Lattice database.
-pub struct Lattice {
-    path: PathBuf,
-    memtable: MemTable,
-    wal: Wal,
-    sstables: Vec<Arc<SSTableReader>>,
-    next_seq: u64,
-    flush_threshold_bytes: usize,
-    compaction_threshold: usize,
-    #[allow(dead_code)] // Used by group commit timer; field reserved.
-    commit_window: std::time::Duration,
-    #[allow(dead_code)] // Used by group commit batch threshold; field reserved.
-    commit_batch: usize,
-    /// Number of non-durable WAL records queued since the last sync.
-    pending_writes: usize,
+/// Immutable view of the LSM state. Clones are cheap (`Arc` field
+/// bumps); reads pin a snapshot for the duration of their work.
+pub(crate) struct State {
+    /// Memtable currently being persisted to an `SSTable`, or `None`
+    /// when no flush is in flight. Reads check this after the active
+    /// memtable so read-your-writes is preserved across a flush.
+    pub(crate) frozen: Option<Arc<MemTable>>,
+    pub(crate) sstables: Vec<Arc<SSTableReader>>,
+    pub(crate) next_seq: u64,
 }
 
-impl Drop for Lattice {
-    /// Graceful close: flush any pending non-durable WAL bytes so a
-    /// well-behaved program does not lose acknowledged writes. Errors
+struct Inner {
+    path: PathBuf,
+    /// Active memtable, mutated on every put and delete.
+    active: RwLock<MemTable>,
+    /// LSM state (frozen memtable, sstables, next seq).
+    state: RwLock<Arc<State>>,
+    /// Append-only log; one writer at a time.
+    wal: Mutex<Wal>,
+    /// Pending non-durable WAL records since the last sync.
+    pending_writes: AtomicUsize,
+    /// Serialises flush and compact so two concurrent puts cannot
+    /// race on `next_seq` or on the manifest write.
+    mutation_lock: Mutex<()>,
+    flush_threshold_bytes: usize,
+    compaction_threshold: usize,
+    #[allow(dead_code)] // Wired to the background flusher in M2.3.
+    commit_window: Duration,
+    commit_batch: usize,
+}
+
+impl Drop for Inner {
+    /// Last-handle close. Flush any pending non-durable WAL bytes so
+    /// well-behaved programs do not lose acknowledged writes. Errors
     /// are logged because Drop cannot return them; callers that care
-    /// about hard failure surfaces should call [`Lattice::flush_wal`]
-    /// explicitly before dropping the handle.
+    /// about hard failure surfaces should call
+    /// [`Lattice::flush_wal`] explicitly before the last clone goes
+    /// away.
     fn drop(&mut self) {
-        if self.pending_writes > 0
-            && let Err(err) = self.flush_wal()
+        if self.pending_writes.load(Ordering::Acquire) > 0
+            && let Err(err) = self.wal.get_mut().sync_pending()
         {
             warn!(
                 ?err,
@@ -164,23 +182,40 @@ impl Drop for Lattice {
     }
 }
 
+/// An open Lattice database.
+///
+/// Cheap to [`Clone`] (one `Arc` increment) and `Send + Sync`, so
+/// multiple threads can hold a handle and read concurrently. Writes
+/// (put, delete) serialise behind a single WAL mutex; reads run in
+/// parallel.
+pub struct Lattice {
+    inner: Arc<Inner>,
+}
+
+impl Clone for Lattice {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
 impl std::fmt::Debug for Lattice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = self.inner.state.read();
         f.debug_struct("Lattice")
-            .field("path", &self.path)
-            .field("sstables", &self.sstables.len())
-            .field("memtable_bytes", &self.memtable.approx_size())
-            .field("next_seq", &self.next_seq)
-            .field("flush_threshold_bytes", &self.flush_threshold_bytes)
-            .field("compaction_threshold", &self.compaction_threshold)
+            .field("path", &self.inner.path)
+            .field("sstables", &state.sstables.len())
+            .field("memtable_bytes", &self.inner.active.read().approx_size())
+            .field("next_seq", &state.next_seq)
+            .field("flush_threshold_bytes", &self.inner.flush_threshold_bytes)
+            .field("compaction_threshold", &self.inner.compaction_threshold)
             .finish_non_exhaustive()
     }
 }
 
 impl Lattice {
-    /// Start a fluent builder for opening a database at `path`. Use
-    /// the returned [`LatticeBuilder`] to override defaults, then
-    /// finish with [`LatticeBuilder::open`].
+    /// Start a fluent builder for opening a database at `path`.
     pub fn builder(path: impl AsRef<Path>) -> LatticeBuilder {
         LatticeBuilder {
             path: path.as_ref().to_path_buf(),
@@ -230,11 +265,11 @@ impl Lattice {
 
         let wal_path = path.join("wal.log");
         let (wal, entries) = Wal::open(&wal_path)?;
-        let mut memtable = MemTable::new();
+        let mut active = MemTable::new();
         for entry in entries {
             match entry {
-                LogEntry::Put { key, value } => memtable.put(key, value),
-                LogEntry::Delete { key } => memtable.delete(key),
+                LogEntry::Put { key, value } => active.put(key, value),
+                LogEntry::Delete { key } => active.delete(key),
             }
         }
         info!(
@@ -244,24 +279,31 @@ impl Lattice {
             "lattice opened"
         );
 
-        Ok(Self {
-            path,
-            memtable,
-            wal,
+        let state = Arc::new(State {
+            frozen: None,
             sstables,
             next_seq: manifest.next_seq,
-            flush_threshold_bytes,
-            compaction_threshold,
-            commit_window,
-            commit_batch,
-            pending_writes: 0,
+        });
+
+        Ok(Self {
+            inner: Arc::new(Inner {
+                path,
+                active: RwLock::new(active),
+                state: RwLock::new(state),
+                wal: Mutex::new(wal),
+                pending_writes: AtomicUsize::new(0),
+                mutation_lock: Mutex::new(()),
+                flush_threshold_bytes,
+                compaction_threshold,
+                commit_window,
+                commit_batch,
+            }),
         })
     }
 
-    /// Insert or overwrite a value for `key` with explicit
-    /// per-write options. See [`WriteOptions`] for the trade-off
-    /// between durability and throughput.
-    pub fn put_with(&mut self, key: &[u8], value: &[u8], opts: WriteOptions) -> Result<()> {
+    /// Insert or overwrite a value for `key` with explicit per-write
+    /// options. See [`WriteOptions`] for the durability trade-off.
+    pub fn put_with(&self, key: &[u8], value: &[u8], opts: WriteOptions) -> Result<()> {
         let entry = LogEntry::Put {
             key: key.to_vec(),
             value: value.to_vec(),
@@ -270,7 +312,26 @@ impl Lattice {
         let LogEntry::Put { key, value } = entry else {
             unreachable!()
         };
-        self.memtable.put(key, value);
+        self.inner.active.write().put(key, value);
+        self.maybe_flush()?;
+        Ok(())
+    }
+
+    /// Insert or overwrite a value for `key`. Equivalent to
+    /// `put_with(key, value, WriteOptions::default())`.
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.put_with(key, value, WriteOptions::default())
+    }
+
+    /// Delete `key`. A subsequent `get` returns `None`. Always
+    /// durable on return; non-durable deletes are not yet exposed.
+    pub fn delete(&self, key: &[u8]) -> Result<()> {
+        let entry = LogEntry::Delete { key: key.to_vec() };
+        self.append_entry(&entry, WriteOptions::default())?;
+        let LogEntry::Delete { key } = entry else {
+            unreachable!()
+        };
+        self.inner.active.write().delete(key);
         self.maybe_flush()?;
         Ok(())
     }
@@ -278,60 +339,59 @@ impl Lattice {
     /// Force a `fsync` of any pending non-durable WAL appends.
     /// Returns once the bytes are on stable storage. A no-op when
     /// nothing is pending.
-    pub fn flush_wal(&mut self) -> Result<()> {
-        if self.pending_writes == 0 {
+    pub fn flush_wal(&self) -> Result<()> {
+        if self.inner.pending_writes.load(Ordering::Acquire) == 0 {
             return Ok(());
         }
-        self.wal.sync_pending()?;
-        self.pending_writes = 0;
+        self.inner.wal.lock().sync_pending()?;
+        self.inner.pending_writes.store(0, Ordering::Release);
         Ok(())
     }
 
-    /// Insert or overwrite a value for `key`. Equivalent to
-    /// `put_with(key, value, WriteOptions::default())`.
-    pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.put_with(key, value, WriteOptions::default())
-    }
-
-    fn append_entry(&mut self, entry: &LogEntry, opts: WriteOptions) -> Result<()> {
-        // Both paths buffer the record first. The durable case then
-        // forces an immediate sync (which also drains any prior
-        // pending non-durable writes), the non-durable case lets the
-        // batch threshold decide.
-        self.wal.append_pending(entry)?;
-        if opts.durable {
-            self.wal.sync_pending()?;
-            self.pending_writes = 0;
-        } else {
-            self.pending_writes = self.pending_writes.saturating_add(1);
-            if self.pending_writes >= self.commit_batch {
-                self.wal.sync_pending()?;
-                self.pending_writes = 0;
+    fn append_entry(&self, entry: &LogEntry, opts: WriteOptions) -> Result<()> {
+        // The whole append-and-maybe-sync runs under the WAL mutex
+        // so the pending counter and the BufWriter stay consistent
+        // with each other. The lock is released as soon as the
+        // bytes are committed; the atomic reset that follows is
+        // observable from any thread without it.
+        let did_sync = {
+            let mut wal = self.inner.wal.lock();
+            wal.append_pending(entry)?;
+            if opts.durable {
+                wal.sync_pending()?;
+                true
+            } else {
+                let prior = self.inner.pending_writes.fetch_add(1, Ordering::AcqRel);
+                if prior + 1 >= self.inner.commit_batch {
+                    wal.sync_pending()?;
+                    true
+                } else {
+                    false
+                }
             }
-        }
-        Ok(())
-    }
-
-    /// Delete `key`. A subsequent `get` returns `None`.
-    pub fn delete(&mut self, key: &[u8]) -> Result<()> {
-        let entry = LogEntry::Delete { key: key.to_vec() };
-        self.wal.append(&entry)?;
-        let LogEntry::Delete { key } = entry else {
-            unreachable!()
         };
-        self.memtable.delete(key);
-        self.maybe_flush()?;
+        if did_sync {
+            self.inner.pending_writes.store(0, Ordering::Release);
+        }
         Ok(())
     }
 
     /// Read the current value for `key`, or `None` if absent or deleted.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        match self.memtable.lookup(key) {
+        match self.inner.active.read().lookup(key) {
             Lookup::Found(value) => return Ok(Some(value.to_vec())),
             Lookup::Tombstoned => return Ok(None),
             Lookup::Absent => {}
         }
-        for sst in self.sstables.iter().rev() {
+        let state = self.inner.state.read().clone();
+        if let Some(frozen) = &state.frozen {
+            match frozen.lookup(key) {
+                Lookup::Found(value) => return Ok(Some(value.to_vec())),
+                Lookup::Tombstoned => return Ok(None),
+                Lookup::Absent => {}
+            }
+        }
+        for sst in state.sstables.iter().rev() {
             match sst.get(key)? {
                 SsLookup::Found(value) => return Ok(Some(value)),
                 SsLookup::Tombstoned => return Ok(None),
@@ -341,19 +401,31 @@ impl Lattice {
         Ok(None)
     }
 
-    /// Iterate live key-value pairs in key order. If `prefix` is `Some`,
-    /// only keys starting with it are returned.
+    /// Iterate live key-value pairs in key order. If `prefix` is
+    /// `Some`, only keys starting with it are returned.
     pub fn scan(&self, prefix: Option<&[u8]>) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let mut accumulator: BTreeMap<Vec<u8>, Option<Vec<u8>>> = BTreeMap::new();
 
-        for (key, value) in self.memtable.iter_all() {
+        for (key, value) in self.inner.active.read().iter_all() {
             if prefix.is_some_and(|p| !key.starts_with(p)) {
                 continue;
             }
             accumulator.insert(key.to_vec(), value.map(<[u8]>::to_vec));
         }
 
-        for sst in self.sstables.iter().rev() {
+        let state = self.inner.state.read().clone();
+        if let Some(frozen) = &state.frozen {
+            for (key, value) in frozen.iter_all() {
+                if prefix.is_some_and(|p| !key.starts_with(p)) {
+                    continue;
+                }
+                accumulator
+                    .entry(key.to_vec())
+                    .or_insert_with(|| value.map(<[u8]>::to_vec));
+            }
+        }
+
+        for sst in state.sstables.iter().rev() {
             for (key, value) in sst.iter_all(prefix)? {
                 accumulator.entry(key).or_insert(value);
             }
@@ -367,80 +439,133 @@ impl Lattice {
 
     /// Flush the current memtable to a new on-disk `SSTable`, then
     /// truncate the WAL. No-op if the memtable is empty.
-    pub fn flush(&mut self) -> Result<()> {
-        if self.memtable.is_empty() {
-            return Ok(());
-        }
-        let seq = self.next_seq;
-        let final_path = sstable_path(&self.path, seq);
-        let tmp_path = self.path.join(format!("{seq:0SSTABLE_DIGITS$}.sst.tmp"));
+    pub fn flush(&self) -> Result<()> {
+        let mutation_guard = self.inner.mutation_lock.lock();
 
+        // Atomic move: drain `active` into an `Arc<MemTable>` and
+        // install it as `state.frozen`. Reads during the SSTable
+        // build see active=empty plus frozen=Some, so they still
+        // observe the data they previously wrote.
+        let (frozen_arc, seq) = {
+            let mut active = self.inner.active.write();
+            let mut state_g = self.inner.state.write();
+
+            if active.is_empty() {
+                return Ok(());
+            }
+            let seq = state_g.next_seq;
+            let drained = Arc::new(std::mem::replace(&mut *active, MemTable::new()));
+            let new_state = Arc::new(State {
+                frozen: Some(Arc::clone(&drained)),
+                sstables: state_g.sstables.clone(),
+                next_seq: state_g.next_seq,
+            });
+            *state_g = new_state;
+            drop(active);
+            drop(state_g);
+            (drained, seq)
+        };
+
+        // Build the SSTable from the frozen memtable.
+        let final_path = sstable_path(&self.inner.path, seq);
+        let tmp_path = self
+            .inner
+            .path
+            .join(format!("{seq:0SSTABLE_DIGITS$}.sst.tmp"));
         let _ = fs::remove_file(&tmp_path);
-        let entries = self.memtable.drain();
         {
-            let mut writer = SSTableWriter::create(&tmp_path, entries.len())?;
-            for (key, value) in entries {
-                writer.append(key, value)?;
+            let mut writer = SSTableWriter::create(&tmp_path, frozen_arc.len())?;
+            for (key, value) in frozen_arc.iter_all() {
+                writer.append(key.to_vec(), value.map(<[u8]>::to_vec))?;
             }
             writer.finish()?;
         }
         fs::rename(&tmp_path, &final_path)?;
-        sync_dir(&self.path)?;
-
+        sync_dir(&self.inner.path)?;
         let reader = Arc::new(SSTableReader::open(&final_path, seq)?);
-        self.sstables.push(reader);
-        self.next_seq = self.next_seq.saturating_add(1);
+
+        // Install: clear `frozen`, append the new reader, bump seq.
+        {
+            let mut state_g = self.inner.state.write();
+            let mut new_sstables = state_g.sstables.clone();
+            new_sstables.push(reader);
+            *state_g = Arc::new(State {
+                frozen: None,
+                sstables: new_sstables,
+                next_seq: seq + 1,
+            });
+        }
 
         self.persist_manifest()?;
-        self.wal.truncate()?;
-        // Memtable contents are now durable in the SSTable. Anything
-        // we were tracking for group commit on the WAL is captured
-        // either way, so the pending counter resets.
-        self.pending_writes = 0;
+
+        // Truncate the WAL, since the memtable contents are now
+        // durable in the SSTable. `pending_writes` resets because the
+        // WAL is now empty.
+        self.inner.wal.lock().truncate()?;
+        self.inner.pending_writes.store(0, Ordering::Release);
+
         info!(seq, path = %final_path.display(), "sstable flushed");
 
-        self.maybe_compact()?;
-        Ok(())
+        drop(mutation_guard);
+
+        self.maybe_compact()
     }
 
     /// Run a compaction across every live `SSTable`, replacing them
-    /// with a single merged table that drops tombstones. No-op if there
-    /// are fewer than two tables.
-    pub fn compact(&mut self) -> Result<()> {
-        if self.sstables.len() < 2 {
-            return Ok(());
-        }
-        let new_seq = self.next_seq;
-        let final_path = sstable_path(&self.path, new_seq);
+    /// with a single merged table that drops tombstones. No-op if
+    /// there are fewer than two tables.
+    pub fn compact(&self) -> Result<()> {
+        let _mutation_guard = self.inner.mutation_lock.lock();
+
+        // Snapshot the current sstables list under a brief read.
+        let (old_readers, new_seq) = {
+            let state = self.inner.state.read();
+            if state.sstables.len() < 2 {
+                return Ok(());
+            }
+            (state.sstables.clone(), state.next_seq)
+        };
+
+        // I/O outside the state lock so reads keep flowing.
+        let final_path = sstable_path(&self.inner.path, new_seq);
         let tmp_path = self
+            .inner
             .path
             .join(format!("{new_seq:0SSTABLE_DIGITS$}.sst.tmp"));
         let _ = fs::remove_file(&tmp_path);
-
-        let readers: Vec<&SSTableReader> = self.sstables.iter().map(Arc::as_ref).collect();
+        let readers: Vec<&SSTableReader> = old_readers.iter().map(Arc::as_ref).collect();
         compaction::compact_all(&readers, &tmp_path)?;
         drop(readers);
         fs::rename(&tmp_path, &final_path)?;
-        sync_dir(&self.path)?;
+        sync_dir(&self.inner.path)?;
         let new_reader = Arc::new(SSTableReader::open(&final_path, new_seq)?);
 
-        let old_seqs: Vec<u64> = self.sstables.iter().map(|r| r.seq()).collect();
-        // Replace readers in memory before persisting the manifest, so
-        // that a panic between rename and save still leaves the engine
-        // in-memory state consistent with the on-disk new file. Any
-        // outstanding `Snapshot` keeps the old `Arc<SSTableReader>`s
-        // alive; that is intentional.
-        self.sstables.clear();
-        self.sstables.push(new_reader);
-        self.next_seq = self.next_seq.saturating_add(1);
+        let old_seqs: Vec<u64> = old_readers.iter().map(|r| r.seq()).collect();
+
+        // Install: replace the sstables vector with the single new
+        // reader, bump next_seq, leave `frozen` alone (a flush in
+        // flight is independent of compaction).
+        {
+            let mut state_g = self.inner.state.write();
+            *state_g = Arc::new(State {
+                frozen: state_g.frozen.clone(),
+                sstables: vec![new_reader],
+                next_seq: new_seq + 1,
+            });
+        }
+        // Drop our local clones of the old `Arc<SSTableReader>`s so
+        // that on POSIX the file removals below actually unlink
+        // (snapshots that still hold them keep the inode alive).
+        drop(old_readers);
+
         self.persist_manifest()?;
 
         for seq in old_seqs {
-            let path = sstable_path(&self.path, seq);
-            if let Err(err) = fs::remove_file(&path) {
+            let p = sstable_path(&self.inner.path, seq);
+            if let Err(err) = fs::remove_file(&p) {
                 warn!(
                     ?err,
-                    path = %path.display(),
+                    path = %p.display(),
                     "could not delete old sstable (likely held by a live Snapshot on Windows; cleaned up on next open)"
                 );
             }
@@ -451,42 +576,67 @@ impl Lattice {
 
     /// Open a read-only point-in-time view of the database.
     ///
-    /// The snapshot sees the exact set of live keys at the time of the
-    /// call. Subsequent `put`, `delete`, `flush`, and `compact` calls
-    /// on the parent do not change what the snapshot sees.
+    /// The snapshot sees the exact set of live keys at the time of
+    /// the call. Subsequent `put`, `delete`, `flush`, and `compact`
+    /// calls on the parent do not change what the snapshot sees.
     pub fn snapshot(&self) -> Snapshot {
+        let state_arc = self.inner.state.read().clone();
+        let active_clone = self.inner.active.read().clone();
+
+        // Merge `frozen` into the snapshot's memtable: keys in
+        // `active` win because they are newer; keys present only in
+        // `frozen` come from before the in-flight flush. The merged
+        // result feeds the existing `Snapshot` API unchanged.
+        let merged = if let Some(frozen) = &state_arc.frozen {
+            let mut merged = active_clone;
+            for (key, value) in frozen.iter_all() {
+                if matches!(merged.lookup(key), Lookup::Absent) {
+                    match value {
+                        Some(v) => merged.put(key.to_vec(), v.to_vec()),
+                        None => merged.delete(key.to_vec()),
+                    }
+                }
+            }
+            merged
+        } else {
+            active_clone
+        };
+
         Snapshot {
-            memtable: self.memtable.clone(),
-            sstables: self.sstables.clone(),
+            memtable: merged,
+            sstables: state_arc.sstables.clone(),
         }
     }
 
     /// Path to the database directory.
     pub fn path(&self) -> &Path {
-        &self.path
+        &self.inner.path
     }
 
-    fn maybe_flush(&mut self) -> Result<()> {
-        if self.memtable.approx_size() >= self.flush_threshold_bytes {
+    fn maybe_flush(&self) -> Result<()> {
+        let size = self.inner.active.read().approx_size();
+        if size >= self.inner.flush_threshold_bytes {
             self.flush()?;
         }
         Ok(())
     }
 
-    fn maybe_compact(&mut self) -> Result<()> {
-        if self.sstables.len() >= self.compaction_threshold {
+    fn maybe_compact(&self) -> Result<()> {
+        let count = self.inner.state.read().sstables.len();
+        if count >= self.inner.compaction_threshold {
             self.compact()?;
         }
         Ok(())
     }
 
     fn persist_manifest(&self) -> Result<()> {
+        let state = self.inner.state.read().clone();
         let manifest = Manifest {
             version: 1,
-            next_seq: self.next_seq,
-            table_seqs: self.sstables.iter().map(|r| r.seq()).collect(),
+            next_seq: state.next_seq,
+            table_seqs: state.sstables.iter().map(|r| r.seq()).collect(),
         };
-        manifest.save(&self.path)
+        manifest.save(&self.inner.path)
     }
 }
 

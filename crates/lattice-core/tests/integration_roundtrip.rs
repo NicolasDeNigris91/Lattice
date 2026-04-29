@@ -13,7 +13,7 @@ use tempfile::tempdir;
 #[test]
 fn put_then_get_returns_value() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
 
     db.put(b"alpha", b"1").unwrap();
 
@@ -24,7 +24,7 @@ fn put_then_get_returns_value() {
 fn put_persists_across_reopen() {
     let dir = tempdir().unwrap();
     {
-        let mut db = Lattice::open(dir.path()).unwrap();
+        let db = Lattice::open(dir.path()).unwrap();
         db.put(b"k", b"v").unwrap();
     }
     let db = Lattice::open(dir.path()).unwrap();
@@ -35,7 +35,7 @@ fn put_persists_across_reopen() {
 fn delete_persists_across_reopen() {
     let dir = tempdir().unwrap();
     {
-        let mut db = Lattice::open(dir.path()).unwrap();
+        let db = Lattice::open(dir.path()).unwrap();
         db.put(b"k", b"v").unwrap();
         db.delete(b"k").unwrap();
     }
@@ -47,7 +47,7 @@ fn delete_persists_across_reopen() {
 fn last_write_wins_across_reopen() {
     let dir = tempdir().unwrap();
     {
-        let mut db = Lattice::open(dir.path()).unwrap();
+        let db = Lattice::open(dir.path()).unwrap();
         db.put(b"k", b"first").unwrap();
         db.put(b"k", b"second").unwrap();
         db.put(b"k", b"third").unwrap();
@@ -59,7 +59,7 @@ fn last_write_wins_across_reopen() {
 #[test]
 fn empty_value_is_distinct_from_absent_key() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
     db.put(b"k", b"").unwrap();
     assert_eq!(db.get(b"k").unwrap(), Some(Vec::new()));
     assert_eq!(db.get(b"never").unwrap(), None);
@@ -69,7 +69,7 @@ fn empty_value_is_distinct_from_absent_key() {
 fn torn_trailing_record_is_ignored() {
     let dir = tempdir().unwrap();
     {
-        let mut db = Lattice::open(dir.path()).unwrap();
+        let db = Lattice::open(dir.path()).unwrap();
         db.put(b"a", b"1").unwrap();
         db.put(b"b", b"2").unwrap();
     }
@@ -89,7 +89,7 @@ fn torn_trailing_record_is_ignored() {
 #[test]
 fn scan_returns_pairs_in_key_order() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
     db.put(b"banana", b"yellow").unwrap();
     db.put(b"apple", b"red").unwrap();
     db.put(b"cherry", b"red").unwrap();
@@ -109,7 +109,7 @@ fn scan_returns_pairs_in_key_order() {
 #[test]
 fn scan_with_prefix_filters_keys() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
     db.put(b"user:1", b"alice").unwrap();
     db.put(b"user:2", b"bob").unwrap();
     db.put(b"product:1", b"book").unwrap();
@@ -128,7 +128,7 @@ fn scan_with_prefix_filters_keys() {
 #[test]
 fn scan_skips_tombstoned_keys() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
     db.put(b"a", b"1").unwrap();
     db.put(b"b", b"2").unwrap();
     db.delete(b"a").unwrap();
@@ -142,7 +142,7 @@ fn scan_skips_tombstoned_keys() {
 fn many_keys_persist_in_order() {
     let dir = tempdir().unwrap();
     {
-        let mut db = Lattice::open(dir.path()).unwrap();
+        let db = Lattice::open(dir.path()).unwrap();
         for i in 0u32..1000 {
             db.put(&i.to_be_bytes(), format!("v{i}").as_bytes())
                 .unwrap();
@@ -165,7 +165,7 @@ fn builder_configures_flush_threshold() {
     // the data resident in an SSTable. Pins the documented surface of
     // `Lattice::builder(path).flush_threshold_bytes(n).open()`.
     let dir = tempdir().unwrap();
-    let mut db = Lattice::builder(dir.path())
+    let db = Lattice::builder(dir.path())
         .flush_threshold_bytes(1024)
         .compaction_threshold(usize::MAX)
         .open()

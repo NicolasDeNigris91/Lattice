@@ -22,7 +22,7 @@ fn put_with_durable_default_persists_across_reopen() {
     // visible after a fresh `open` with no explicit flush.
     let dir = tempdir().unwrap();
     {
-        let mut db = Lattice::open(dir.path()).unwrap();
+        let db = Lattice::open(dir.path()).unwrap();
         db.put_with(b"k", b"v", WriteOptions::default()).unwrap();
     }
     let db = Lattice::open(dir.path()).unwrap();
@@ -35,7 +35,7 @@ fn put_with_non_durable_is_visible_in_same_session() {
     // non-durable writes, because the memtable is updated in
     // lock-step with the WAL append regardless of fsync timing.
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
     db.put_with(b"k", b"v", WriteOptions { durable: false })
         .unwrap();
     assert_eq!(db.get(b"k").unwrap(), Some(b"v".to_vec()));
@@ -50,7 +50,7 @@ fn non_durable_writes_persist_after_explicit_flush_wal_and_reopen() {
     // but I will checkpoint myself" path.
     let dir = tempdir().unwrap();
     {
-        let mut db = Lattice::open(dir.path()).unwrap();
+        let db = Lattice::open(dir.path()).unwrap();
         for i in 0u32..200 {
             db.put_with(&i.to_be_bytes(), b"v", WriteOptions { durable: false })
                 .unwrap();
@@ -77,7 +77,7 @@ fn non_durable_writes_are_lost_when_drop_is_skipped() {
     // tick. After reopen the value must be absent: this is what
     // "non-durable" actually means.
     let dir = tempdir().unwrap();
-    let mut db = Lattice::builder(dir.path())
+    let db = Lattice::builder(dir.path())
         .commit_window(std::time::Duration::from_secs(3600))
         .commit_batch(usize::MAX)
         .open()
@@ -101,7 +101,7 @@ fn commit_batch_threshold_makes_non_durable_durable_without_flush_wal() {
     // that point the bytes survive a skipped Drop, while the seventh
     // put alone would not. Pins the batch trigger semantics.
     let dir = tempdir().unwrap();
-    let mut db = Lattice::builder(dir.path())
+    let db = Lattice::builder(dir.path())
         .commit_window(std::time::Duration::from_secs(3600))
         .commit_batch(8)
         .open()

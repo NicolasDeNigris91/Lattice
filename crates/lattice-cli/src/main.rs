@@ -63,7 +63,7 @@ fn init_tracing() {
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Command::Put { key, value } => {
-            let mut db = Lattice::open(&cli.path).context("open database")?;
+            let db = Lattice::open(&cli.path).context("open database")?;
             db.put(key.as_bytes(), value.as_bytes())
                 .context("put failed")?;
             Ok(ExitCode::SUCCESS)
@@ -81,7 +81,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
         }
         Command::Delete { key } => {
-            let mut db = Lattice::open(&cli.path).context("open database")?;
+            let db = Lattice::open(&cli.path).context("open database")?;
             db.delete(key.as_bytes()).context("delete failed")?;
             Ok(ExitCode::SUCCESS)
         }
@@ -100,7 +100,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Compact => {
-            let mut db = Lattice::open(&cli.path).context("open database")?;
+            let db = Lattice::open(&cli.path).context("open database")?;
             db.compact().context("compact failed")?;
             Ok(ExitCode::SUCCESS)
         }

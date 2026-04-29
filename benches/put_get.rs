@@ -28,7 +28,7 @@ fn bench_sequential_write(c: &mut Criterion) {
     c.bench_function("sequential_write_10k", |b| {
         b.iter_batched(
             fresh_db,
-            |(dir, mut db)| {
+            |(dir, db)| {
                 for i in 0..N {
                     db.put(&key(i), b"value-bytes").unwrap();
                 }
@@ -50,7 +50,7 @@ fn bench_sequential_write_amortized(c: &mut Criterion) {
     c.bench_function("sequential_write_amortized_10k", |b| {
         b.iter_batched(
             fresh_db,
-            |(dir, mut db)| {
+            |(dir, db)| {
                 let opts = WriteOptions { durable: false };
                 for i in 0..N {
                     db.put_with(&key(i), b"value-bytes", opts).unwrap();
@@ -69,7 +69,7 @@ fn bench_sequential_write_amortized(c: &mut Criterion) {
 /// `N` random reads against a database with `N` keys, all hits.
 fn bench_random_read_hits(c: &mut Criterion) {
     let dir = tempfile::tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
     for i in 0..N {
         db.put(&key(i), b"value-bytes").unwrap();
     }
@@ -93,7 +93,7 @@ fn bench_random_read_hits(c: &mut Criterion) {
 /// Measures the bloom filter short-circuit on the read path.
 fn bench_random_read_misses(c: &mut Criterion) {
     let dir = tempfile::tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
     for i in 0..N {
         db.put(&key(i), b"value-bytes").unwrap();
     }
@@ -114,7 +114,7 @@ fn bench_random_read_misses(c: &mut Criterion) {
 /// Full scan of a database with `N` keys.
 fn bench_scan_all(c: &mut Criterion) {
     let dir = tempfile::tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
     for i in 0..N {
         db.put(&key(i), b"value-bytes").unwrap();
     }

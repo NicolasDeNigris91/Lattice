@@ -17,7 +17,7 @@ fn count_sst_files(dir: &std::path::Path) -> usize {
 #[test]
 fn manual_compact_collapses_multiple_sstables_into_one() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
 
     db.put(b"a", b"1").unwrap();
     db.flush().unwrap();
@@ -39,7 +39,7 @@ fn manual_compact_collapses_multiple_sstables_into_one() {
 #[test]
 fn compact_drops_tombstones_and_old_overrides() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
 
     db.put(b"a", b"1").unwrap();
     db.put(b"deleted", b"goneSoon").unwrap();
@@ -66,7 +66,7 @@ fn compact_drops_tombstones_and_old_overrides() {
 #[test]
 fn auto_compaction_at_threshold() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::builder(dir.path())
+    let db = Lattice::builder(dir.path())
         .compaction_threshold(3)
         .open()
         .unwrap();
@@ -89,7 +89,7 @@ fn auto_compaction_at_threshold() {
 fn compaction_state_survives_reopen() {
     let dir = tempdir().unwrap();
     {
-        let mut db = Lattice::open(dir.path()).unwrap();
+        let db = Lattice::open(dir.path()).unwrap();
         for i in 0u32..10 {
             db.put(&i.to_be_bytes(), format!("v{i}").as_bytes())
                 .unwrap();
@@ -119,7 +119,7 @@ fn manifest_is_created_on_open_when_missing() {
 fn orphan_sstable_is_deleted_on_open() {
     let dir = tempdir().unwrap();
     {
-        let mut db = Lattice::open(dir.path()).unwrap();
+        let db = Lattice::open(dir.path()).unwrap();
         db.put(b"k", b"v").unwrap();
         db.flush().unwrap();
     }
@@ -139,7 +139,7 @@ fn orphan_sstable_is_deleted_on_open() {
 #[test]
 fn compact_with_no_sstables_is_noop() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
     db.compact().unwrap();
     assert_eq!(count_sst_files(dir.path()), 0);
 }
@@ -147,7 +147,7 @@ fn compact_with_no_sstables_is_noop() {
 #[test]
 fn compact_with_one_sstable_is_noop() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
     db.put(b"k", b"v").unwrap();
     db.flush().unwrap();
     let before = fs::metadata(dir.path().join("000001.sst")).unwrap().len();
@@ -193,7 +193,7 @@ fn open_cleans_orphans_left_by_a_simulated_post_compact_crash() {
 
     let dir = tempdir().unwrap();
     {
-        let mut db = Lattice::builder(dir.path())
+        let db = Lattice::builder(dir.path())
             .compaction_threshold(usize::MAX)
             .open()
             .unwrap();
@@ -228,7 +228,7 @@ fn open_cleans_orphans_left_by_a_simulated_post_compact_crash() {
 #[test]
 fn many_flushes_then_compact_preserves_all_keys() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::builder(dir.path())
+    let db = Lattice::builder(dir.path())
         .compaction_threshold(usize::MAX) // disable auto-compaction
         .open()
         .unwrap();

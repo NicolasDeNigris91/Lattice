@@ -84,14 +84,6 @@ impl Wal {
         Ok(())
     }
 
-    /// Append a single entry. Returns once the bytes are durable
-    /// (`BufWriter` flushed and the file `fsync`ed).
-    pub(crate) fn append(&mut self, entry: &LogEntry) -> Result<()> {
-        self.append_pending(entry)?;
-        self.sync_pending()?;
-        Ok(())
-    }
-
     /// Append a single entry into the in-memory `BufWriter` only. The
     /// bytes do not reach the OS until either the buffer fills, a
     /// later [`Wal::sync_pending`] call, or the next [`Wal::append`].
