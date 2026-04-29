@@ -7,6 +7,36 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-04-29
+
+### Added
+- Optional `tokio` feature on `lattice-core` exposes `AsyncLattice`,
+  a thin wrapper around the synchronous engine that runs each
+  operation on tokio's blocking pool via `tokio::task::spawn_blocking`.
+  Methods: `open`, `put`, `get`, `delete`, `scan`, `flush`,
+  `flush_wal`, `compact`, `sync`. Cloning is one `Arc` bump on the
+  underlying `Lattice`.
+- Four contract tests in `tests/async_api.rs`, gated by the `tokio`
+  feature: round-trip put/get, delete, prefix scan, and concurrent
+  puts from many tokio tasks.
+- Book chapter 12 ("Async I/O") explains the wrapper, the trade-off
+  vs native async, and when each is the right call.
+
+### Notes
+- v1.5 is **async-friendly**, not natively async: locks remain
+  `parking_lot` and file I/O remains `std::fs`, with each call's
+  blocking work pushed to tokio's blocking pool. Native async
+  (replacing the locks and the I/O with their tokio equivalents)
+  is a v2.x rewrite, deferred so v1.x can ship the surface that
+  unblocks the most embed cases first.
+- The choice between async support and primary/replica WAL
+  streaming for this milestone went to async because the
+  ecosystem is overwhelmingly tokio-first; replication is a
+  larger project (Raft, leader election, exactly-once) that
+  belongs in v2.x.
+- The `tokio` feature is opt-in and adds no compile-time cost or
+  runtime overhead when off; the synchronous API is unchanged.
+
 ## [1.4.0] - 2026-04-29
 
 ### Added
@@ -327,7 +357,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   case to exercise replay.
 - Book chapters 1 (the write ahead log) and 2 (the memtable).
 
-[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.5.0
 [1.4.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.4.0
 [1.3.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.3.0
 [1.2.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.2.0
