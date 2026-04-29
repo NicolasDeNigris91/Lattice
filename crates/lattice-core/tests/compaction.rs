@@ -66,8 +66,10 @@ fn compact_drops_tombstones_and_old_overrides() {
 #[test]
 fn auto_compaction_at_threshold() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
-    db.set_compaction_threshold(3);
+    let mut db = Lattice::builder(dir.path())
+        .compaction_threshold(3)
+        .open()
+        .unwrap();
 
     db.put(b"a", b"1").unwrap();
     db.flush().unwrap();
@@ -191,8 +193,10 @@ fn open_cleans_orphans_left_by_a_simulated_post_compact_crash() {
 
     let dir = tempdir().unwrap();
     {
-        let mut db = Lattice::open(dir.path()).unwrap();
-        db.set_compaction_threshold(usize::MAX);
+        let mut db = Lattice::builder(dir.path())
+            .compaction_threshold(usize::MAX)
+            .open()
+            .unwrap();
         db.put(b"alpha", b"1").unwrap();
         db.flush().unwrap();
         db.put(b"beta", b"2").unwrap();
@@ -224,8 +228,10 @@ fn open_cleans_orphans_left_by_a_simulated_post_compact_crash() {
 #[test]
 fn many_flushes_then_compact_preserves_all_keys() {
     let dir = tempdir().unwrap();
-    let mut db = Lattice::open(dir.path()).unwrap();
-    db.set_compaction_threshold(usize::MAX); // disable auto-compaction
+    let mut db = Lattice::builder(dir.path())
+        .compaction_threshold(usize::MAX) // disable auto-compaction
+        .open()
+        .unwrap();
 
     for i in 0u32..200 {
         db.put(&i.to_be_bytes(), format!("v{i}").as_bytes())

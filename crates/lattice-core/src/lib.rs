@@ -113,7 +113,7 @@ impl LatticeBuilder {
 const DEFAULT_FLUSH_THRESHOLD_BYTES: usize = 4 * 1024 * 1024;
 
 /// Default number of live `SSTable`s before an auto-compaction is
-/// triggered. Tunable via [`Lattice::set_compaction_threshold`].
+/// triggered. Tunable via [`LatticeBuilder::compaction_threshold`].
 const DEFAULT_COMPACTION_THRESHOLD: usize = 4;
 
 /// Default group commit window. Non-durable writes accumulate in the
@@ -256,18 +256,6 @@ impl Lattice {
             commit_batch,
             pending_writes: 0,
         })
-    }
-
-    /// Override the auto-flush threshold. Mostly useful for tests.
-    #[doc(hidden)]
-    pub const fn set_flush_threshold(&mut self, bytes: usize) {
-        self.flush_threshold_bytes = bytes;
-    }
-
-    /// Override the auto-compaction threshold. Mostly useful for tests.
-    #[doc(hidden)]
-    pub const fn set_compaction_threshold(&mut self, tables: usize) {
-        self.compaction_threshold = tables;
     }
 
     /// Insert or overwrite a value for `key` with explicit
