@@ -140,8 +140,38 @@ pub(crate) struct State {
     /// when no flush is in flight. Reads check this after the active
     /// memtable so read-your-writes is preserved across a flush.
     pub(crate) frozen: Option<Arc<MemTable>>,
-    pub(crate) sstables: Vec<Arc<SSTableReader>>,
+    /// `SSTable`s partitioned by LSM level. `levels[0]` is L0
+    /// (allowed to overlap by key range, written by flush);
+    /// `levels[1]` is L1 onward (non-overlapping inside a level,
+    /// written by leveled compaction). Phase 2 of M3 carries the
+    /// shape; the leveled algorithm itself lands in phase 3.
+    pub(crate) levels: Vec<Vec<Arc<SSTableReader>>>,
     pub(crate) next_seq: u64,
+}
+
+impl State {
+    /// Iterate every live `SSTable`, newest first. L0 is walked
+    /// end-to-start (last push = newest); L1 onward is walked in
+    /// natural order because each level is internally
+    /// non-overlapping. Used by `get` and `scan` to produce
+    /// last-writer-wins semantics.
+    pub(crate) fn all_sstables_newest_first(
+        &self,
+    ) -> impl Iterator<Item = &Arc<SSTableReader>> + '_ {
+        let l0 = self
+            .levels
+            .first()
+            .into_iter()
+            .flat_map(|l0| l0.iter().rev());
+        let lower = self.levels.iter().skip(1).flat_map(|level| level.iter());
+        l0.chain(lower)
+    }
+
+    /// Total number of live `SSTable`s across every level. Used by
+    /// the auto-compaction trigger and by Debug.
+    pub(crate) fn total_sstables(&self) -> usize {
+        self.levels.iter().map(Vec::len).sum()
+    }
 }
 
 struct Inner {
@@ -257,7 +287,8 @@ impl std::fmt::Debug for Lattice {
         let state = self.inner.state.read();
         f.debug_struct("Lattice")
             .field("path", &self.inner.path)
-            .field("sstables", &state.sstables.len())
+            .field("sstables", &state.total_sstables())
+            .field("levels", &state.levels.len())
             .field("memtable_bytes", &self.inner.active.read().approx_size())
             .field("next_seq", &state.next_seq)
             .field("flush_threshold_bytes", &self.inner.flush_threshold_bytes)
@@ -308,12 +339,19 @@ impl Lattice {
         let live: BTreeSet<u64> = flat.iter().copied().collect();
         delete_orphans(&path, &live)?;
 
-        let mut sstables = Vec::with_capacity(live.len());
-        for seq in &flat {
-            sstables.push(Arc::new(SSTableReader::open(
-                &sstable_path(&path, *seq),
-                *seq,
-            )?));
+        // Reconstruct the per-level reader vectors from the manifest.
+        // Empty levels at the tail are kept so Debug and the
+        // compaction policy can see them.
+        let mut levels: Vec<Vec<Arc<SSTableReader>>> = Vec::with_capacity(manifest.levels.len());
+        for level_seqs in &manifest.levels {
+            let mut readers = Vec::with_capacity(level_seqs.len());
+            for seq in level_seqs {
+                readers.push(Arc::new(SSTableReader::open(
+                    &sstable_path(&path, *seq),
+                    *seq,
+                )?));
+            }
+            levels.push(readers);
         }
 
         let wal_path = path.join("wal.log");
@@ -325,8 +363,10 @@ impl Lattice {
                 LogEntry::Delete { key } => active.delete(key),
             }
         }
+        let total_sstables: usize = levels.iter().map(Vec::len).sum();
         info!(
-            sstables = sstables.len(),
+            sstables = total_sstables,
+            levels = levels.len(),
             next_seq = manifest.next_seq,
             path = %path.display(),
             "lattice opened"
@@ -334,7 +374,7 @@ impl Lattice {
 
         let state = Arc::new(State {
             frozen: None,
-            sstables,
+            levels,
             next_seq: manifest.next_seq,
         });
 
@@ -456,7 +496,7 @@ impl Lattice {
                 Lookup::Absent => {}
             }
         }
-        for sst in state.sstables.iter().rev() {
+        for sst in state.all_sstables_newest_first() {
             match sst.get(key)? {
                 SsLookup::Found(value) => return Ok(Some(value)),
                 SsLookup::Tombstoned => return Ok(None),
@@ -490,7 +530,7 @@ impl Lattice {
             }
         }
 
-        for sst in state.sstables.iter().rev() {
+        for sst in state.all_sstables_newest_first() {
             for (key, value) in sst.iter_all(prefix)? {
                 accumulator.entry(key).or_insert(value);
             }
@@ -522,7 +562,7 @@ impl Lattice {
             let drained = Arc::new(std::mem::replace(&mut *active, MemTable::new()));
             let new_state = Arc::new(State {
                 frozen: Some(Arc::clone(&drained)),
-                sstables: state_g.sstables.clone(),
+                levels: state_g.levels.clone(),
                 next_seq: state_g.next_seq,
             });
             *state_g = new_state;
@@ -549,14 +589,20 @@ impl Lattice {
         sync_dir(&self.inner.path)?;
         let reader = Arc::new(SSTableReader::open(&final_path, seq)?);
 
-        // Install: clear `frozen`, append the new reader, bump seq.
+        // Install: clear `frozen`, append the new reader to L0,
+        // bump seq. New tables from a memtable flush always land in
+        // L0 because their key range may overlap any existing L0
+        // table (last-writer-wins resolves it).
         {
             let mut state_g = self.inner.state.write();
-            let mut new_sstables = state_g.sstables.clone();
-            new_sstables.push(reader);
+            let mut new_levels = state_g.levels.clone();
+            if new_levels.is_empty() {
+                new_levels.push(Vec::new());
+            }
+            new_levels[0].push(reader);
             *state_g = Arc::new(State {
                 frozen: None,
-                sstables: new_sstables,
+                levels: new_levels,
                 next_seq: seq + 1,
             });
         }
@@ -579,16 +625,31 @@ impl Lattice {
     /// Run a compaction across every live `SSTable`, replacing them
     /// with a single merged table that drops tombstones. No-op if
     /// there are fewer than two tables.
+    ///
+    /// Phase 2 of M3 keeps the legacy "merge everything to one
+    /// table" algorithm; the leveled algorithm lands in phase 3.
+    /// The merged result goes back into L0 for now.
     pub fn compact(&self) -> Result<()> {
         let _mutation_guard = self.inner.mutation_lock.lock();
 
-        // Snapshot the current sstables list under a brief read.
+        // Snapshot every live reader across every level under a
+        // brief read. Order is oldest first (L1 onward in level
+        // order, then L0 in insertion order) because `compact_all`
+        // is a last-writer-wins merge: later inputs override
+        // earlier ones, and "later" here means "newer in the LSM".
         let (old_readers, new_seq) = {
             let state = self.inner.state.read();
-            if state.sstables.len() < 2 {
+            if state.total_sstables() < 2 {
                 return Ok(());
             }
-            (state.sstables.clone(), state.next_seq)
+            let mut flat: Vec<Arc<SSTableReader>> = Vec::with_capacity(state.total_sstables());
+            for level in state.levels.iter().skip(1) {
+                flat.extend(level.iter().cloned());
+            }
+            if let Some(l0) = state.levels.first() {
+                flat.extend(l0.iter().cloned());
+            }
+            (flat, state.next_seq)
         };
 
         // I/O outside the state lock so reads keep flowing.
@@ -607,14 +668,14 @@ impl Lattice {
 
         let old_seqs: Vec<u64> = old_readers.iter().map(|r| r.seq()).collect();
 
-        // Install: replace the sstables vector with the single new
-        // reader, bump next_seq, leave `frozen` alone (a flush in
-        // flight is independent of compaction).
+        // Install: replace every level with a single L0 entry, bump
+        // next_seq, leave `frozen` alone (a flush in flight is
+        // independent of compaction).
         {
             let mut state_g = self.inner.state.write();
             *state_g = Arc::new(State {
                 frozen: state_g.frozen.clone(),
-                sstables: vec![new_reader],
+                levels: vec![vec![new_reader]],
                 next_seq: new_seq + 1,
             });
         }
@@ -669,7 +730,7 @@ impl Lattice {
 
         Snapshot {
             memtable: merged,
-            sstables: state_arc.sstables.clone(),
+            levels: state_arc.levels.clone(),
         }
     }
 
@@ -687,7 +748,7 @@ impl Lattice {
     }
 
     fn maybe_compact(&self) -> Result<()> {
-        let count = self.inner.state.read().sstables.len();
+        let count = self.inner.state.read().total_sstables();
         if count >= self.inner.compaction_threshold {
             self.compact()?;
         }
@@ -696,15 +757,15 @@ impl Lattice {
 
     fn persist_manifest(&self) -> Result<()> {
         let state = self.inner.state.read().clone();
-        // Phase 1 of M3: the on-disk format is v2 (`levels`), but the
-        // engine still treats the table set as one flat tier. Until
-        // the leveled algorithm lands the engine writes everything
-        // into `levels[0]`. Reads upgrade legacy v1 manifests into
-        // the same shape, so behaviour is unchanged.
+        let manifest_levels: Vec<Vec<u64>> = state
+            .levels
+            .iter()
+            .map(|level| level.iter().map(|r| r.seq()).collect())
+            .collect();
         let manifest = Manifest {
             version: crate::manifest::MANIFEST_VERSION,
             next_seq: state.next_seq,
-            levels: vec![state.sstables.iter().map(|r| r.seq()).collect()],
+            levels: manifest_levels,
         };
         manifest.save(&self.inner.path)
     }

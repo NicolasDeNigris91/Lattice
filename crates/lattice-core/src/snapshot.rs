@@ -25,10 +25,25 @@ use crate::sstable::{SSTableReader, SsLookup};
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub(crate) memtable: MemTable,
-    pub(crate) sstables: Vec<Arc<SSTableReader>>,
+    /// `SSTable`s partitioned by LSM level at snapshot time. Same
+    /// shape as `Lattice`'s live state: `levels[0]` is L0, `levels[1]`
+    /// onward are non-overlapping within a level.
+    pub(crate) levels: Vec<Vec<Arc<SSTableReader>>>,
 }
 
 impl Snapshot {
+    /// Iterate every captured `SSTable`, newest first. Same ordering
+    /// rule as the live engine.
+    fn ssts_newest_first(&self) -> impl Iterator<Item = &Arc<SSTableReader>> + '_ {
+        let l0 = self
+            .levels
+            .first()
+            .into_iter()
+            .flat_map(|l0| l0.iter().rev());
+        let lower = self.levels.iter().skip(1).flat_map(|level| level.iter());
+        l0.chain(lower)
+    }
+
     /// Read the value of `key` as it existed when the snapshot was
     /// created.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -37,7 +52,7 @@ impl Snapshot {
             Lookup::Tombstoned => return Ok(None),
             Lookup::Absent => {}
         }
-        for sst in self.sstables.iter().rev() {
+        for sst in self.ssts_newest_first() {
             match sst.get(key)? {
                 SsLookup::Found(value) => return Ok(Some(value)),
                 SsLookup::Tombstoned => return Ok(None),
@@ -60,7 +75,7 @@ impl Snapshot {
             accumulator.insert(key.to_vec(), value.map(<[u8]>::to_vec));
         }
 
-        for sst in self.sstables.iter().rev() {
+        for sst in self.ssts_newest_first() {
             for (key, value) in sst.iter_all(prefix)? {
                 accumulator.entry(key).or_insert(value);
             }
