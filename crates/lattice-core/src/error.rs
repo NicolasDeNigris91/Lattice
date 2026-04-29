@@ -17,4 +17,13 @@ pub enum Error {
     /// A binary decoding error from the WAL or `SSTable` codecs.
     #[error("decode error: {0}")]
     Decode(#[from] bincode::error::DecodeError),
+
+    /// LZ4 decompression of an `SSTable` block failed.
+    #[error("decompress error: {0}")]
+    Decompress(#[from] lz4_flex::block::DecompressError),
+
+    /// An `SSTable` file is missing required structure (footer, magic,
+    /// supported format version, well-formed index).
+    #[error("malformed sstable: {0}")]
+    MalformedSstable(&'static str),
 }

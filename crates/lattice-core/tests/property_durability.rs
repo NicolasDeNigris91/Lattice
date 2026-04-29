@@ -18,6 +18,8 @@ use tempfile::tempdir;
 enum Op {
     Put(Vec<u8>, Vec<u8>),
     Delete(Vec<u8>),
+    /// Force a flush of the memtable into a new `SSTable`.
+    Flush,
 }
 
 fn arb_key() -> impl Strategy<Value = Vec<u8>> {
@@ -39,8 +41,9 @@ fn arb_value() -> impl Strategy<Value = Vec<u8>> {
 
 fn arb_op() -> impl Strategy<Value = Op> {
     prop_oneof![
-        4 => (arb_key(), arb_value()).prop_map(|(k, v)| Op::Put(k, v)),
-        1 => arb_key().prop_map(Op::Delete),
+        8 => (arb_key(), arb_value()).prop_map(|(k, v)| Op::Put(k, v)),
+        2 => arb_key().prop_map(Op::Delete),
+        1 => Just(Op::Flush),
     ]
 }
 
@@ -66,15 +69,17 @@ proptest! {
                     Op::Put(k, v) => {
                         db.put(k, v).unwrap();
                         reference.insert(k.clone(), v.clone());
+                        all_keys.insert(k.clone());
                     }
                     Op::Delete(k) => {
                         db.delete(k).unwrap();
                         reference.remove(k);
+                        all_keys.insert(k.clone());
+                    }
+                    Op::Flush => {
+                        db.flush().unwrap();
                     }
                 }
-                all_keys.insert(match op {
-                    Op::Put(k, _) | Op::Delete(k) => k.clone(),
-                });
             }
         }
 

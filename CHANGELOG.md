@@ -7,6 +7,33 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-29
+
+### Added
+- Immutable on-disk sorted string tables (`SSTable`) with LZ4-compressed
+  data blocks, sparse index, and 32-byte footer.
+- `SSTableWriter` (streaming, key-ordered) and `SSTableReader` (footer
+  parse, sparse index lookup, block-level scan).
+- `Lattice::flush` API that drains the memtable into a new SSTable,
+  renames atomically from `*.sst.tmp`, then truncates the WAL.
+- Auto-flush at a configurable byte threshold (default 4 MiB).
+- Three-state `Lookup` enum on the memtable, distinguishing tombstones
+  from absence so the read path knows whether to consult older layers.
+- Mixed-source read path: memtable first, then SSTables newest to
+  oldest, returning on the first non-`Absent` answer.
+- Newest-source-wins merge in `scan`, including across multiple
+  SSTables.
+- `discover_sstables` on `open`, sorting by sequence number derived from
+  the filename.
+- Property test extended with an `Op::Flush` variant so generated
+  sequences exercise interleaved flushes plus reopen replay.
+- Book chapter 3 (sorted string tables).
+
+### Fixed
+- WAL truncation now opens a separate write-mode file handle, working
+  around Windows ACL behaviour where `FILE_APPEND_DATA` does not grant
+  `FILE_WRITE_DATA`.
+
 ## [0.1.0] - 2026-04-29
 
 ### Added
@@ -25,5 +52,6 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   case to exercise replay.
 - Book chapters 1 (the write ahead log) and 2 (the memtable).
 
-[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v0.2.0
 [0.1.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v0.1.0

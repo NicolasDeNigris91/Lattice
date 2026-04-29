@@ -63,6 +63,27 @@ impl Wal {
         ))
     }
 
+    /// Truncate the WAL to zero length and `fsync` it. Called after a
+    /// successful flush, when the entries the WAL was protecting are now
+    /// durable in an `SSTable` and replay is no longer needed.
+    ///
+    /// Implementation note: the active writer was opened with `append`
+    /// mode, which on Windows grants `FILE_APPEND_DATA` but not
+    /// `FILE_WRITE_DATA`, so calling `set_len` on that handle fails with
+    /// `ACCESS_DENIED`. We open a separate write-mode handle just for
+    /// the truncation. Both handles share the same inode under Rust's
+    /// default `FILE_SHARE_*` flags.
+    pub(crate) fn truncate(&mut self) -> Result<()> {
+        self.writer.flush()?;
+        let truncating = OpenOptions::new().write(true).open(&self.path)?;
+        truncating.set_len(0)?;
+        truncating.sync_data()?;
+        drop(truncating);
+        // The append handle's effective offset becomes "end of file",
+        // which is now zero. Subsequent appends will land at offset 0.
+        Ok(())
+    }
+
     /// Append a single entry. Returns once the bytes are durable.
     pub(crate) fn append(&mut self, entry: &LogEntry) -> Result<()> {
         let payload = bincode::encode_to_vec(entry, BINCODE_CONFIG)?;
