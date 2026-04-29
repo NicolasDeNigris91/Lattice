@@ -304,11 +304,12 @@ impl Lattice {
             None => bootstrap_manifest(&path)?,
         };
 
-        let live: BTreeSet<u64> = manifest.table_seqs.iter().copied().collect();
+        let flat = manifest.flat_table_seqs();
+        let live: BTreeSet<u64> = flat.iter().copied().collect();
         delete_orphans(&path, &live)?;
 
         let mut sstables = Vec::with_capacity(live.len());
-        for seq in &manifest.table_seqs {
+        for seq in &flat {
             sstables.push(Arc::new(SSTableReader::open(
                 &sstable_path(&path, *seq),
                 *seq,
@@ -695,10 +696,15 @@ impl Lattice {
 
     fn persist_manifest(&self) -> Result<()> {
         let state = self.inner.state.read().clone();
+        // Phase 1 of M3: the on-disk format is v2 (`levels`), but the
+        // engine still treats the table set as one flat tier. Until
+        // the leveled algorithm lands the engine writes everything
+        // into `levels[0]`. Reads upgrade legacy v1 manifests into
+        // the same shape, so behaviour is unchanged.
         let manifest = Manifest {
-            version: 1,
+            version: crate::manifest::MANIFEST_VERSION,
             next_seq: state.next_seq,
-            table_seqs: state.sstables.iter().map(|r| r.seq()).collect(),
+            levels: vec![state.sstables.iter().map(|r| r.seq()).collect()],
         };
         manifest.save(&self.inner.path)
     }
@@ -731,9 +737,9 @@ fn bootstrap_manifest(dir: &Path) -> Result<Manifest> {
     let seqs = scan_sst_seqs(dir)?;
     let next_seq = seqs.last().copied().map_or(1, |s| s + 1);
     let manifest = Manifest {
-        version: 1,
+        version: crate::manifest::MANIFEST_VERSION,
         next_seq,
-        table_seqs: seqs,
+        levels: vec![seqs],
     };
     manifest.save(dir)?;
     Ok(manifest)
