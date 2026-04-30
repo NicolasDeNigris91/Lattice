@@ -27,6 +27,15 @@ The project bar is the same one the CI enforces:
   green.
 - `cargo check --workspace --all-targets --all-features` clean on
   the MSRV toolchain (currently 1.85).
+- `cargo deny check --all-features --workspace` clean (advisories,
+  licences, banned crates, source registries). Required when a PR
+  touches `Cargo.toml` or `Cargo.lock`. The configuration lives in
+  `deny.toml` at the workspace root; if your dependency change adds
+  a licence outside the existing allow list, the PR should also
+  update the allow list with a one-line justification.
+- `cargo deny check` and the line-coverage report run on every CI
+  build. Coverage is tracked but not gated; the lcov artifact is
+  published per run for review.
 
 A failing CI job blocks the PR.
 
@@ -55,6 +64,12 @@ failing on a PR, the PR is the cause unless proven otherwise.
   the contributor.
 - Comments are reserved for non-obvious invariants. Self-evident
   code does not need a comment.
+
+## Code of conduct
+
+Participation is governed by the
+[Contributor Covenant](CODE_OF_CONDUCT.md). Reports go to
+nicolas.denigris91@icloud.com.
 
 ## License
 

@@ -1,0 +1,46 @@
+name: Feature request
+description: Propose a new behaviour or a meaningful change to existing behaviour.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Lattice is a single-author project. Features that align with
+        the roadmap (see the book and CHANGELOG) are easier to land
+        than greenfield additions. Please skim those first.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: |
+        Concrete scenario you are trying to support. "It would be
+        nice if X" is harder to act on than "I am building Y and
+        currently have to work around Z".
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed shape
+      description: |
+        API sketch, file layout, or behavioural contract. A rough
+        first pass is fine; the goal is to make the proposal
+        reviewable.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: |
+        Other approaches you weighed and why this is the one you
+        recommend. "I did not consider any" is a valid answer if
+        the problem is small enough.
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope check
+      description: |
+        Does this fit a single feature release, or is it a multi-
+        milestone effort? If the latter, would you be willing to
+        split it?

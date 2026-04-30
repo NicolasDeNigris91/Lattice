@@ -1,0 +1,72 @@
+name: Bug report
+description: Report a defect that reproduces against the current `main`.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a report. Please make the reproduction as
+        small as you can; the smaller it is, the faster a fix lands.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One sentence describing the bug.
+      placeholder: "`Lattice::scan` returns an empty `Vec` after a flush when..."
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: |
+        Smallest sequence of operations that triggers the issue.
+        Code snippet, or an exact `cargo test` command. The shorter
+        the better.
+      render: rust
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Including any panic message and backtrace.
+    validations:
+      required: true
+  - type: input
+    id: rustc
+    attributes:
+      label: rustc version
+      description: Output of `rustc --version`.
+      placeholder: "rustc 1.85.0 (xxxx 2025-xx-xx)"
+    validations:
+      required: true
+  - type: input
+    id: lattice-version
+    attributes:
+      label: Lattice version or commit
+      description: Tag (e.g. `v1.10.0`) or commit SHA.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Other (please describe in summary)
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Logs, screenshots, related issues. Optional.
