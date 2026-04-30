@@ -34,7 +34,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use parking_lot::{Mutex, RwLock};
-use tracing::{info, warn};
+use tracing::{info, instrument, warn};
 
 pub use crate::error::{Error, Result};
 use crate::manifest::Manifest;
@@ -334,6 +334,7 @@ impl Lattice {
     /// bootstraps one), opens the listed `SSTable`s, deletes any orphan
     /// `*.sst` files left over from a crash mid-compaction, then
     /// replays the write-ahead log.
+    #[instrument(level = "info", skip_all, fields(path = %path.as_ref().display()))]
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::builder(path).open()
     }
@@ -428,6 +429,11 @@ impl Lattice {
 
     /// Insert or overwrite a value for `key` with explicit per-write
     /// options. See [`WriteOptions`] for the durability trade-off.
+    #[instrument(
+        level = "debug",
+        skip(self, value),
+        fields(key_len = key.len(), value_len = value.len(), durable = opts.durable),
+    )]
     pub fn put_with(&self, key: &[u8], value: &[u8], opts: WriteOptions) -> Result<()> {
         let entry = LogEntry::Put {
             key: key.to_vec(),
@@ -451,6 +457,7 @@ impl Lattice {
 
     /// Delete `key`. A subsequent `get` returns `None`. Always
     /// durable on return; non-durable deletes are not yet exposed.
+    #[instrument(level = "debug", skip(self), fields(key_len = key.len()))]
     pub fn delete(&self, key: &[u8]) -> Result<()> {
         let entry = LogEntry::Delete { key: key.to_vec() };
         let needs_flush = {
@@ -466,6 +473,7 @@ impl Lattice {
     /// Force a `fsync` of any pending non-durable WAL appends.
     /// Returns once the bytes are on stable storage. A no-op when
     /// nothing is pending.
+    #[instrument(level = "debug", skip(self))]
     pub fn flush_wal(&self) -> Result<()> {
         if self.inner.pending_writes.load(Ordering::Acquire) == 0 {
             return Ok(());
@@ -537,6 +545,7 @@ impl Lattice {
     }
 
     /// Read the current value for `key`, or `None` if absent or deleted.
+    #[instrument(level = "trace", skip(self), fields(key_len = key.len()))]
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         match self.inner.active.read().lookup(key) {
             Lookup::Found(value) => return Ok(Some(value.to_vec())),
@@ -563,6 +572,7 @@ impl Lattice {
 
     /// Iterate live key-value pairs in key order. If `prefix` is
     /// `Some`, only keys starting with it are returned.
+    #[instrument(level = "debug", skip(self), fields(prefix_len = prefix.map_or(0, <[u8]>::len)))]
     pub fn scan(&self, prefix: Option<&[u8]>) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let mut accumulator: BTreeMap<Vec<u8>, Option<Vec<u8>>> = BTreeMap::new();
 
@@ -599,6 +609,7 @@ impl Lattice {
 
     /// Flush the current memtable to a new on-disk `SSTable`, then
     /// truncate the WAL. No-op if the memtable is empty.
+    #[instrument(level = "info", skip(self))]
     pub fn flush(&self) -> Result<()> {
         let mutation_guard = self.inner.mutation_lock.lock();
 
@@ -690,6 +701,7 @@ impl Lattice {
     /// algorithm only rewrites one level's bytes per round, so write
     /// amplification scales with the number of levels (~`log_T(N)`)
     /// rather than the total dataset size.
+    #[instrument(level = "info", skip(self))]
     pub fn compact(&self) -> Result<()> {
         loop {
             let target = {
@@ -807,6 +819,7 @@ impl Lattice {
     /// The snapshot sees the exact set of live keys at the time of
     /// the call. Subsequent `put`, `delete`, `flush`, and `compact`
     /// calls on the parent do not change what the snapshot sees.
+    #[instrument(level = "debug", skip(self))]
     pub fn snapshot(&self) -> Snapshot {
         let state_arc = self.inner.state.read().clone();
         let active_clone = self.inner.active.read().clone();
@@ -853,6 +866,7 @@ impl Lattice {
     /// by another writer after the transaction's snapshot was
     /// taken. The standard recovery is to retry the closure against
     /// a fresh snapshot.
+    #[instrument(level = "info", skip_all)]
     pub fn transaction<F, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&mut Transaction<'_>) -> Result<R>,

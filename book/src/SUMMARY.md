@@ -27,6 +27,10 @@
 
 - [Async I/O](12-async.md)
 
+# Observability
+
+- [Observability](13-observability.md)
+
 # Beyond v1.0
 
 - [What is not yet implemented](08-not-yet.md)

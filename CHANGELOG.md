@@ -7,6 +7,32 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-04-29
+
+### Added
+- `tracing` spans on every public method via
+  `#[tracing::instrument]`. Spans carry useful fields (key
+  length, value length, durability flag for writes; prefix
+  length for scans; full path for `open`) and skip the engine
+  itself so subscribers do not see a `Lattice` debug dump on
+  every call. Levels are tuned to the cost of the call: trace
+  for `get`, debug for `put` / `delete` / `flush_wal` / `scan` /
+  `snapshot`, info for `open` / `flush` / `compact` /
+  `transaction`. The pre-existing `info!` and `warn!` events
+  inside those methods now nest under the corresponding span,
+  so a downstream collector (jaeger, tempo, otel-collector)
+  sees a clean parent-child shape without further work.
+- Book chapter 13 ("Observability") explains the span layout,
+  the levels, and the recommended `RUST_LOG` filters.
+
+### Notes
+- No behavioural changes. Spans are zero-cost when no
+  subscriber is installed, and inexpensive otherwise.
+- Prometheus metrics opt-in (the `metrics` facade behind a
+  feature flag) is tracked as v1.8 work; spans alone are
+  enough to drive distributed-tracing systems and that is the
+  bigger immediate win.
+
 ## [1.6.0] - 2026-04-29
 
 Closes both deferrals from v1.4 (transaction conflict detection)
@@ -444,7 +470,8 @@ and v1.5 (async transaction wrapper).
   case to exercise replay.
 - Book chapters 1 (the write ahead log) and 2 (the memtable).
 
-[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.7.0
 [1.6.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.6.0
 [1.5.1]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.5.1
 [1.5.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.5.0
