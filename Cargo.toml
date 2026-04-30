@@ -44,6 +44,12 @@ clap = { version = "4.5", features = ["derive"] }
 # Async runtime (optional; gated behind the `tokio` feature on lattice-core)
 tokio = { version = "1.41", default-features = false }
 
+# Metrics facade (optional; gated behind the `metrics` feature on
+# lattice-core). The user installs a recorder (Prometheus, statsd,
+# OTel, ...); the engine just records via the facade macros, which
+# are no-ops when no recorder is installed.
+metrics = { version = "0.24", default-features = false }
+
 # Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

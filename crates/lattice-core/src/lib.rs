@@ -16,6 +16,7 @@ mod compaction;
 mod error;
 mod manifest;
 mod memtable;
+mod metrics_compat;
 mod snapshot;
 mod sstable;
 mod transaction;
@@ -435,6 +436,7 @@ impl Lattice {
         fields(key_len = key.len(), value_len = value.len(), durable = opts.durable),
     )]
     pub fn put_with(&self, key: &[u8], value: &[u8], opts: WriteOptions) -> Result<()> {
+        let started = Instant::now();
         let entry = LogEntry::Put {
             key: key.to_vec(),
             value: value.to_vec(),
@@ -446,6 +448,7 @@ impl Lattice {
         if needs_flush {
             self.flush()?;
         }
+        metrics_compat::record_put(started.elapsed());
         Ok(())
     }
 
@@ -459,6 +462,7 @@ impl Lattice {
     /// durable on return; non-durable deletes are not yet exposed.
     #[instrument(level = "debug", skip(self), fields(key_len = key.len()))]
     pub fn delete(&self, key: &[u8]) -> Result<()> {
+        let started = Instant::now();
         let entry = LogEntry::Delete { key: key.to_vec() };
         let needs_flush = {
             let mut wal = self.inner.wal.lock();
@@ -467,6 +471,7 @@ impl Lattice {
         if needs_flush {
             self.flush()?;
         }
+        metrics_compat::record_delete(started.elapsed());
         Ok(())
     }
 
@@ -547,6 +552,13 @@ impl Lattice {
     /// Read the current value for `key`, or `None` if absent or deleted.
     #[instrument(level = "trace", skip(self), fields(key_len = key.len()))]
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let started = Instant::now();
+        let value = self.get_inner(key)?;
+        metrics_compat::record_get(started.elapsed(), value.is_some());
+        Ok(value)
+    }
+
+    fn get_inner(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         match self.inner.active.read().lookup(key) {
             Lookup::Found(value) => return Ok(Some(value.to_vec())),
             Lookup::Tombstoned => return Ok(None),
@@ -611,6 +623,7 @@ impl Lattice {
     /// truncate the WAL. No-op if the memtable is empty.
     #[instrument(level = "info", skip(self))]
     pub fn flush(&self) -> Result<()> {
+        let started = Instant::now();
         let mutation_guard = self.inner.mutation_lock.lock();
 
         // Atomic move: drain `active` into an `Arc<MemTable>` and
@@ -682,6 +695,7 @@ impl Lattice {
         self.inner.pending_writes.store(0, Ordering::Release);
 
         info!(seq, path = %final_path.display(), "sstable flushed");
+        metrics_compat::record_flush(started.elapsed());
 
         drop(mutation_guard);
 
@@ -724,6 +738,7 @@ impl Lattice {
     /// pushed to `level_idx + 1`. Internal helper used by both the
     /// auto-compaction trigger and the user-facing `compact()`.
     fn compact_level(&self, level_idx: usize) -> Result<()> {
+        let started = Instant::now();
         let _mutation_guard = self.inner.mutation_lock.lock();
 
         // Snapshot the source level. Sources are taken in insertion
@@ -811,6 +826,7 @@ impl Lattice {
             new_seq,
             "level compacted"
         );
+        metrics_compat::record_compaction(started.elapsed());
         Ok(())
     }
 
@@ -871,6 +887,7 @@ impl Lattice {
     where
         F: FnOnce(&mut Transaction<'_>) -> Result<R>,
     {
+        let started = Instant::now();
         let snapshot = self.snapshot();
         let snapshot_seq = self.inner.write_seq.load(Ordering::Acquire);
         let mut tx = Transaction::new(snapshot, snapshot_seq);
@@ -891,6 +908,7 @@ impl Lattice {
                     if let Some(&last_seq) = last_writes.get(key)
                         && last_seq > tx.snapshot_seq
                     {
+                        metrics_compat::record_transaction_conflict();
                         return Err(Error::TransactionConflict);
                     }
                 }
@@ -914,6 +932,7 @@ impl Lattice {
         if needs_flush {
             self.flush()?;
         }
+        metrics_compat::record_transaction_commit(started.elapsed());
         Ok(outcome)
     }
 

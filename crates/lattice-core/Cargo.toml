@@ -24,6 +24,10 @@ default = []
 # parking_lot and std::fs with their tokio equivalents) is a v2.x
 # milestone.
 tokio = ["dep:tokio", "tokio/rt"]
+# Records counters and histograms through the `metrics` crate facade.
+# Zero-cost when no recorder is installed at runtime; the user wires
+# their own exporter (e.g. `metrics-exporter-prometheus`).
+metrics = ["dep:metrics"]
 
 [dependencies]
 serde = { workspace = true }
@@ -36,6 +40,7 @@ parking_lot = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, optional = true }
+metrics = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
