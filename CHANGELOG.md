@@ -7,6 +7,69 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-04-30
+
+Closes a memory leak that landed in v1.6 and was deferred in
+the changelog at the time. The fix is local to `Inner`; no
+public API changes.
+
+### Added
+- `Inner::active_tx`: a `Mutex<BTreeMap<u64, usize>>` multiset
+  of currently-live transaction `snapshot_seq` values. The
+  smallest key is the trim cutoff.
+- `ActiveTxGuard`: scope guard returned by
+  `Lattice::register_active_tx`. Decrements the multiset on
+  drop, including panic unwinding.
+- `Lattice::maybe_trim_last_writes`: size-triggered trim of the
+  `last_writes` map. Threshold is 1024 entries
+  (`LAST_WRITES_TRIM_THRESHOLD`). Above the threshold, retains
+  only entries with `seq` strictly greater than the smallest
+  active `snapshot_seq` (or the current `write_seq` when no
+  transaction is in flight). Called from `put_with`, `delete`,
+  and `transaction` after the WAL mutex is released.
+- Two new unit tests inside `lib.rs`:
+  - `last_writes_does_not_grow_unbounded_without_active_transactions`
+    pins the resource bound: 2048 distinct-key writes leave
+    `last_writes.len() <= 1024`.
+  - `trim_does_not_drop_entries_an_active_transaction_still_needs`
+    pins the soundness invariant: while T1 holds a snapshot of
+    `K`, T2's overwrite plus 2048 noise writes must not let
+    T1's commit silently succeed; T1 must still abort with
+    `Error::TransactionConflict`.
+- Book chapter 11 ("Transactions") gains a "Trimming
+  `last_writes`" section explaining the cutoff, the soundness
+  invariant, the lock discipline, and the two new tests.
+
+### Changed
+- `Lattice::transaction` now goes
+  `snapshot()` -> `register_active_tx()` (captures
+  `snapshot_seq` under the `active_tx` lock) -> closure -> WAL
+  apply -> guard drop -> `maybe_trim_last_writes`. Capturing
+  `snapshot_seq` inside the `active_tx` lock guarantees that a
+  concurrent trim sees this transaction's registration before
+  it computes its cutoff. Previous behaviour (snapshot first,
+  then a free-running `write_seq.load`) is preserved at the
+  observable level: any write between the snapshot and the seq
+  capture is read-skew, not a phantom commit.
+- The end of chapter 11's test list is brought up to date: the
+  v1.6 conflict-detection test is now listed, and a typo in the
+  disjoint-keys test name is fixed.
+
+### Notes
+- TDD discipline: the resource-bound test was written first,
+  watched fail (`got 2048, expected <= 1024`), and went green
+  on the implementation. The soundness test was written
+  second, before any wiring of `register_active_tx` to the
+  transaction path, so the test exercised both the registration
+  and the trim cutoff.
+- `active_tx` and the WAL mutex are deliberately unrelated.
+  Transactions take `active_tx` to register, release it, then
+  acquire the WAL mutex; the trim takes `active_tx` and
+  `last_writes` (write) but never the WAL mutex. This keeps
+  `apply_entry_locked`'s single-mutex discipline intact.
+- 75 tests pass (73 prior integration tests plus the two new
+  unit tests in `lib.rs`).
+
 ## [1.9.0] - 2026-04-30
 
 ### Added
