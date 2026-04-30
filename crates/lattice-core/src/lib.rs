@@ -45,6 +45,12 @@ use crate::sstable::{SSTableReader, SSTableWriter, SsLookup};
 pub use crate::transaction::Transaction;
 use crate::wal::{LogEntry, Wal};
 
+/// Number of `last_writes` entries that triggers a trim pass after
+/// the next put / delete / transaction commit. The trim runs in
+/// O(n) over the map, so a fixed threshold keeps amortised cost
+/// per write at O(1) regardless of total dataset size.
+const LAST_WRITES_TRIM_THRESHOLD: usize = 1024;
+
 /// Per-write knobs. Today this is only `durable`; future options
 /// (e.g. write priority) will land here without breaking callers.
 #[derive(Debug, Clone, Copy)]
@@ -201,8 +207,22 @@ struct Inner {
     /// Last `write_seq` at which each key was modified. Updated
     /// under the WAL mutex on every successful put or delete.
     /// Read by transaction commit to decide whether the
-    /// transaction's snapshot is still consistent.
+    /// transaction's snapshot is still consistent. Trimmed when
+    /// `len() > LAST_WRITES_TRIM_THRESHOLD`; entries with `seq`
+    /// not greater than the oldest active transaction's
+    /// `snapshot_seq` (or `write_seq` when no transaction is
+    /// active) are dropped, since they cannot trigger a conflict
+    /// for any present-or-future transaction.
     last_writes: RwLock<BTreeMap<Vec<u8>, u64>>,
+    /// Multiset of `snapshot_seq` values currently held by
+    /// in-flight transactions. The smallest key is the trim
+    /// cutoff: any entry in `last_writes` with `seq` not greater
+    /// than this minimum cannot trigger a conflict for an
+    /// in-flight transaction (the conflict check fires only when
+    /// `entry.seq > tx.snapshot_seq`). Updated under its own
+    /// mutex, never simultaneously with the WAL mutex, so the two
+    /// locks have no ordering relationship.
+    active_tx: Mutex<BTreeMap<u64, usize>>,
     /// Serialises flush and compact so two concurrent puts cannot
     /// race on `next_seq` or on the manifest write.
     mutation_lock: Mutex<()>,
@@ -406,6 +426,7 @@ impl Lattice {
             pending_writes: AtomicUsize::new(0),
             write_seq: AtomicU64::new(0),
             last_writes: RwLock::new(BTreeMap::new()),
+            active_tx: Mutex::new(BTreeMap::new()),
             mutation_lock: Mutex::new(()),
             flush_threshold_bytes,
             compaction_threshold,
@@ -448,6 +469,7 @@ impl Lattice {
         if needs_flush {
             self.flush()?;
         }
+        self.maybe_trim_last_writes();
         metrics_compat::record_put(started.elapsed());
         Ok(())
     }
@@ -471,6 +493,7 @@ impl Lattice {
         if needs_flush {
             self.flush()?;
         }
+        self.maybe_trim_last_writes();
         metrics_compat::record_delete(started.elapsed());
         Ok(())
     }
@@ -889,7 +912,15 @@ impl Lattice {
     {
         let started = Instant::now();
         let snapshot = self.snapshot();
-        let snapshot_seq = self.inner.write_seq.load(Ordering::Acquire);
+        // The guard holds the smallest atomic step: register
+        // `snapshot_seq` in the active-tx multiset under
+        // `active_tx.lock()` and capture the same `write_seq` that
+        // was active at that lock. A concurrent trim observes this
+        // registration before it computes its cutoff, so any
+        // entry whose `seq` could still trigger our conflict check
+        // is preserved in `last_writes`.
+        let active_guard = self.register_active_tx();
+        let snapshot_seq = active_guard.snapshot_seq;
         let mut tx = Transaction::new(snapshot, snapshot_seq);
         let outcome = f(&mut tx)?;
 
@@ -932,6 +963,12 @@ impl Lattice {
         if needs_flush {
             self.flush()?;
         }
+        // Drop the active-tx registration BEFORE the trim runs, so
+        // the trim's cutoff is not pinned by this transaction's
+        // (now-completed) snapshot. The guard's Drop deregisters
+        // under `active_tx.lock()`.
+        drop(active_guard);
+        self.maybe_trim_last_writes();
         metrics_compat::record_transaction_commit(started.elapsed());
         Ok(outcome)
     }
@@ -969,6 +1006,74 @@ impl Lattice {
             levels: manifest_levels,
         };
         manifest.save(&self.inner.path)
+    }
+
+    /// Register a new in-flight transaction by capturing its
+    /// `snapshot_seq` and incrementing the `active_tx` multiset
+    /// under a single lock. The returned guard decrements on drop.
+    /// This must run before [`Self::snapshot`]'s value is read by
+    /// the transaction so that any concurrent trim observes this
+    /// transaction's `snapshot_seq` and refrains from dropping
+    /// entries that the transaction's commit might still need.
+    fn register_active_tx(&self) -> ActiveTxGuard<'_> {
+        let snapshot_seq = {
+            let mut active = self.inner.active_tx.lock();
+            let seq = self.inner.write_seq.load(Ordering::Acquire);
+            *active.entry(seq).or_insert(0) += 1;
+            seq
+        };
+        ActiveTxGuard {
+            inner: &self.inner,
+            snapshot_seq,
+        }
+    }
+
+    /// Drop entries from `last_writes` whose `seq` cannot trigger a
+    /// conflict for any in-flight or future transaction. A no-op
+    /// when the map is below the trim threshold.
+    ///
+    /// Cutoff = the smallest `snapshot_seq` of any in-flight
+    /// transaction, or the current `write_seq` when no transaction
+    /// is in flight. The retain keeps entries with `seq > cutoff`,
+    /// because the conflict check fires when `entry.seq >
+    /// tx.snapshot_seq` and any retained entry must therefore be
+    /// preserved for at least the oldest transaction.
+    fn maybe_trim_last_writes(&self) {
+        if self.inner.last_writes.read().len() <= LAST_WRITES_TRIM_THRESHOLD {
+            return;
+        }
+        let cutoff = {
+            let active = self.inner.active_tx.lock();
+            active
+                .keys()
+                .next()
+                .copied()
+                .unwrap_or_else(|| self.inner.write_seq.load(Ordering::Acquire))
+        };
+        let mut last_writes = self.inner.last_writes.write();
+        last_writes.retain(|_, seq| *seq > cutoff);
+    }
+}
+
+/// Drops a transaction's `snapshot_seq` from the `active_tx`
+/// multiset on scope exit, including panic unwinding. The bare
+/// integer field plus reference is a deliberate choice over a
+/// callback closure: the engine is `Send + Sync` and a closure
+/// would force a heavier bound on the guard.
+struct ActiveTxGuard<'a> {
+    inner: &'a Inner,
+    snapshot_seq: u64,
+}
+
+impl Drop for ActiveTxGuard<'_> {
+    fn drop(&mut self) {
+        let mut active = self.inner.active_tx.lock();
+        if let Some(count) = active.get_mut(&self.snapshot_seq) {
+            *count -= 1;
+            if *count == 0 {
+                active.remove(&self.snapshot_seq);
+            }
+        }
     }
 }
 
@@ -1047,4 +1152,109 @@ fn scan_sst_seqs(dir: &Path) -> Result<Vec<u64>> {
     }
     seqs.sort_unstable();
     Ok(seqs)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    use super::{Error, LAST_WRITES_TRIM_THRESHOLD, Lattice};
+    use tempfile::tempdir;
+
+    #[test]
+    fn last_writes_does_not_grow_unbounded_without_active_transactions() {
+        // The conflict-detection map (`Inner::last_writes`) records
+        // the latest `write_seq` per key. With no active transaction,
+        // no entry is load-bearing for a future commit (any future
+        // transaction starts at a snapshot_seq >= the current
+        // `write_seq`, so every existing entry's `seq <= snapshot_seq`,
+        // i.e. cannot trigger a conflict).
+        //
+        // Without trimming, the map grows by one entry per unique
+        // key forever. v1.10 introduces a size-triggered trim. After
+        // 2 * threshold non-transactional writes, the map MUST be
+        // bounded by the threshold; the precise count depends on the
+        // trim cadence, but unbounded growth (= 2 * threshold
+        // entries) is the failure we are pinning out.
+        let dir = tempdir().unwrap();
+        let db = Lattice::open(dir.path()).unwrap();
+
+        for i in 0..(2 * LAST_WRITES_TRIM_THRESHOLD) {
+            let key = format!("k{i:08}");
+            db.put(key.as_bytes(), b"v").unwrap();
+        }
+
+        let len = db.inner.last_writes.read().len();
+        assert!(
+            len <= LAST_WRITES_TRIM_THRESHOLD,
+            "last_writes must be bounded by the trim threshold; got {len}, expected <= {LAST_WRITES_TRIM_THRESHOLD}",
+        );
+    }
+
+    #[test]
+    fn trim_does_not_drop_entries_an_active_transaction_still_needs() {
+        // Soundness invariant: while a transaction is in flight,
+        // any entry whose `seq` is greater than that transaction's
+        // `snapshot_seq` must survive a trim, because the
+        // transaction's commit may yet need to detect a conflict
+        // against it. The thread spawning + barrier-free
+        // synchronisation here pins this end-to-end: T1 starts and
+        // reads `K`, T2 then does enough non-transactional writes
+        // to push `last_writes` well past the trim threshold (and
+        // also overwrites `K`), and T1 commits. The commit MUST
+        // abort with `Error::TransactionConflict`; if the trim ate
+        // the entry for `K`, the conflict goes undetected and T1
+        // commits silently over T2's overwrite, which is the
+        // lost-update bug v1.6 closed.
+        let dir = tempdir().unwrap();
+        let db = Lattice::open(dir.path()).unwrap();
+        db.put(b"k", b"v0").unwrap();
+
+        let started = Arc::new(AtomicBool::new(false));
+        let t2_done = Arc::new(AtomicBool::new(false));
+
+        let t1 = {
+            let db = db.clone();
+            let started = Arc::clone(&started);
+            let t2_done = Arc::clone(&t2_done);
+            thread::spawn(move || {
+                db.transaction(|tx| {
+                    assert_eq!(tx.get(b"k").unwrap(), Some(b"v0".to_vec()));
+                    started.store(true, Ordering::Release);
+                    while !t2_done.load(Ordering::Acquire) {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    tx.put(b"k", b"v_t1");
+                    Ok::<_, Error>(())
+                })
+            })
+        };
+
+        // Wait for T1 to be inside its transaction with `k` in its
+        // read-set, then do enough non-transactional writes to
+        // push `last_writes` past the trim threshold AND overwrite
+        // `k`. The trim that fires during these writes must
+        // observe T1's registration in `active_tx` and refrain
+        // from dropping the entry for `k` (whose `seq` is now
+        // greater than T1's `snapshot_seq`).
+        while !started.load(Ordering::Acquire) {
+            thread::sleep(Duration::from_millis(1));
+        }
+        for i in 0..(2 * LAST_WRITES_TRIM_THRESHOLD) {
+            let key = format!("noise{i:08}");
+            db.put(key.as_bytes(), b"x").unwrap();
+        }
+        db.put(b"k", b"v_t2").unwrap();
+        t2_done.store(true, Ordering::Release);
+
+        let r1 = t1.join().unwrap();
+        assert!(
+            matches!(r1, Err(Error::TransactionConflict)),
+            "T1 commit must abort with TransactionConflict, got {r1:?}",
+        );
+        assert_eq!(db.get(b"k").unwrap(), Some(b"v_t2".to_vec()));
+    }
 }
