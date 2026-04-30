@@ -48,6 +48,7 @@ tempfile = { workspace = true }
 criterion = { workspace = true }
 bincode = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing-test = { workspace = true }
 
 [[bench]]
 name = "put_get"

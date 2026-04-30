@@ -8,6 +8,7 @@ use std::io;
 
 use lattice_core::{Error, Lattice};
 use tempfile::tempdir;
+use tracing_test::traced_test;
 
 #[test]
 fn transaction_isolated_read_view() {
@@ -60,6 +61,7 @@ fn transaction_read_your_own_writes_within_tx() {
 }
 
 #[test]
+#[traced_test]
 fn transaction_commit_applies_all_writes_atomically() {
     // After a successful commit, every write performed inside the
     // transaction is visible through the parent handle. The set is
@@ -155,6 +157,7 @@ fn read_only_transaction_commits_with_no_writes() {
 }
 
 #[test]
+#[traced_test]
 fn concurrent_transactions_on_same_key_second_aborts_with_conflict() {
     // Two transactions race on the same key. T1 starts, reads K
     // (recording it in its read-set). T2 modifies K (a plain put,

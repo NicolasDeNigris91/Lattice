@@ -5,6 +5,7 @@
 
 use lattice_core::{Lattice, WriteOptions};
 use tempfile::tempdir;
+use tracing_test::traced_test;
 
 #[test]
 fn write_options_default_is_durable() {
@@ -95,6 +96,7 @@ fn non_durable_writes_are_lost_when_drop_is_skipped() {
 }
 
 #[test]
+#[traced_test]
 fn commit_batch_threshold_makes_non_durable_durable_without_flush_wal() {
     // With `commit_batch = 8` and the timer disabled, the eighth
     // non-durable put must trigger an automatic group commit. After

@@ -53,6 +53,11 @@ metrics = { version = "0.24", default-features = false }
 # Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# Captures `tracing` events emitted from a `#[traced_test]` test so
+# the test body can assert on them. Wraps each annotated test in a
+# scoped subscriber, so concurrent tests do not see each other's
+# events.
+tracing-test = "0.2"
 
 # Testing and bench
 proptest = "1.5"
