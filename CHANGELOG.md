@@ -7,6 +7,45 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-04-30
+
+### Added
+- `tracing-test` 0.2 in workspace dev-dependencies. Three
+  behaviour-pinning integration tests now carry
+  `#[traced_test]`:
+  - `transaction_commit_applies_all_writes_atomically`
+  - `concurrent_transactions_on_same_key_second_aborts_with_conflict`
+  - `commit_batch_threshold_makes_non_durable_durable_without_flush_wal`
+  Each annotated test installs a per-test `tracing` subscriber
+  for the duration of the test, scoped so concurrent tests do
+  not see each other's events. The annotation also exposes the
+  `logs_contain` and `logs_assert` helpers, available for
+  assertions that check trace output as part of the contract
+  surface.
+- Book chapter 13 ("Observability") gains a "Tracing inside
+  tests" section explaining the macro, when to reach for it,
+  and how to combine it with `RUST_LOG=lattice_core=debug
+  cargo test -- --nocapture` to surface engine events from a
+  failing test without wiring a subscriber by hand.
+
+### Notes
+- Closes the second half of the M6 milestone alongside v1.7
+  (spans on every method) and v1.8 (metrics opt-in). M6 is now
+  complete: distributed-tracing collectors, operational
+  dashboards, and a test harness that surfaces engine events
+  on demand all share the same instrumentation.
+- `#[traced_test]` only captures events on the test thread by
+  default. Multi-threaded tests (the conflict-detection one in
+  particular) emit spans from spawned threads, so the
+  annotation is decorative there: the macro plays nicely, but
+  `logs_contain` cannot assert across threads. The chapter
+  flags this honestly.
+- The annotated set is intentionally small. The contract is
+  "this test should produce useful trace output when you
+  reach for it", not "every test asserts on its trace
+  output". Annotating every test would slow the suite without
+  paying for itself.
+
 ## [1.8.0] - 2026-04-30
 
 ### Added

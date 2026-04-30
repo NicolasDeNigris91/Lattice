@@ -21,14 +21,15 @@ design decision in plain language.
 
 ## Status
 
-v1.8.0. Five didactic phases plus durability hardening (v1.0.1),
+v1.9.0. Five didactic phases plus durability hardening (v1.0.1),
 opt-in group commit (v1.1.0), `Send + Sync + Clone` with parallel
 reads (v1.2.0), size-tiered leveled compaction with manifest v2
 (v1.3.0), snapshot-isolated transactions (v1.4.0), an optional
 tokio wrapper (v1.5.0), transaction conflict detection plus an
 async transaction companion (v1.6.0), structured tracing spans
-on every public method (v1.7.0), and opt-in metrics through the
-`metrics` crate facade (v1.8.0). Seventy three tests across
+on every public method (v1.7.0), opt-in metrics through the
+`metrics` crate facade (v1.8.0), and `tracing-test` wired into
+the integration tests (v1.9.0). Seventy three tests across
 integration, property, contract, concurrency, transaction, and
 async suites, full mdBook published alongside the code. See the
 [CHANGELOG](CHANGELOG.md) for what each tag delivered.
@@ -74,6 +75,7 @@ lattice compact
 | v1.6.0 | Transaction conflict detection + AsyncTransaction       |
 | v1.7.0 | Structured `tracing` spans on every public method       |
 | v1.8.0 | Opt-in metrics via the `metrics` crate facade           |
+| v1.9.0 | `tracing-test` wired into integration tests             |
 
 ## Deployment
 
