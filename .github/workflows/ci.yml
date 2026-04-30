@@ -70,6 +70,46 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # Run every check (advisories, licenses, bans, sources)
+          # in one pass against the workspace.
+          command: check
+          arguments: --all-features --workspace
+
+  coverage:
+    name: coverage (cargo-llvm-cov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Run tests under llvm-cov
+        run: cargo llvm-cov --workspace --all-features --no-report
+      - name: Print coverage summary
+        run: cargo llvm-cov report --summary-only
+      - name: Export lcov
+        run: |
+          cargo llvm-cov report --lcov \
+            --output-path lcov.info \
+            --ignore-filename-regex '(tests/|benches/)'
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: lcov.info
+          retention-days: 14
+
   msrv:
     name: msrv (${{ matrix.toolchain }})
     runs-on: ubuntu-latest
