@@ -21,13 +21,14 @@ design decision in plain language.
 
 ## Status
 
-v1.7.0. Five didactic phases plus durability hardening (v1.0.1),
+v1.8.0. Five didactic phases plus durability hardening (v1.0.1),
 opt-in group commit (v1.1.0), `Send + Sync + Clone` with parallel
 reads (v1.2.0), size-tiered leveled compaction with manifest v2
 (v1.3.0), snapshot-isolated transactions (v1.4.0), an optional
 tokio wrapper (v1.5.0), transaction conflict detection plus an
-async transaction companion (v1.6.0), and structured tracing
-spans on every public method (v1.7.0). Seventy three tests across
+async transaction companion (v1.6.0), structured tracing spans
+on every public method (v1.7.0), and opt-in metrics through the
+`metrics` crate facade (v1.8.0). Seventy three tests across
 integration, property, contract, concurrency, transaction, and
 async suites, full mdBook published alongside the code. See the
 [CHANGELOG](CHANGELOG.md) for what each tag delivered.
@@ -40,6 +41,9 @@ cargo add lattice-core
 
 # Library (async wrapper via tokio's blocking pool)
 cargo add lattice-core --features tokio
+
+# Library (with Prometheus / statsd / OTel counters and histograms)
+cargo add lattice-core --features metrics
 
 # CLI
 cargo install lattice-cli           # once published
@@ -69,6 +73,7 @@ lattice compact
 | v1.5.1 | Publish-readiness polish: MSRV CI + badges + CONTRIB    |
 | v1.6.0 | Transaction conflict detection + AsyncTransaction       |
 | v1.7.0 | Structured `tracing` spans on every public method       |
+| v1.8.0 | Opt-in metrics via the `metrics` crate facade           |
 
 ## Deployment
 

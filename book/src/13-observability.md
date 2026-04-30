@@ -77,10 +77,9 @@ by the span machinery. The `get` span sits at the trace level
 specifically so a default `info` subscriber does not pay the
 formatting cost on the read hot path.
 
-## What is not yet shipped
+## Metrics
 
-Prometheus metrics (counters and histograms via the `metrics`
-crate facade behind a feature flag) are tracked as v1.8 work.
-Spans alone drive distributed-tracing systems, which is the
-bigger immediate win for embedded use; a metrics layer adds
-operational dashboards on top.
+Counters and histograms via the `metrics` crate facade ship in
+v1.8 behind the `metrics` feature flag. Spans drive
+distributed-tracing systems; metrics drive operational
+dashboards. See chapter 14.

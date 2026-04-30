@@ -30,6 +30,7 @@
 # Observability
 
 - [Observability](13-observability.md)
+- [Metrics](14-metrics.md)
 
 # Beyond v1.0
 

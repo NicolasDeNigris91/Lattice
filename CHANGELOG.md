@@ -7,6 +7,59 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-04-30
+
+### Added
+- Optional `metrics` feature flag. With the feature enabled,
+  every public method on `Lattice` records counters and
+  histograms through the [`metrics`] crate facade. Seven
+  counters (`lattice_puts_total`, `lattice_deletes_total`,
+  `lattice_gets_total`, `lattice_get_hits_total`,
+  `lattice_get_misses_total`, `lattice_flushes_total`,
+  `lattice_compactions_total`, `lattice_transaction_commits_total`,
+  `lattice_transaction_conflicts_total`) and six histograms
+  (`*_duration_seconds` for put, delete, get, flush, compaction,
+  transaction). The user installs their own recorder
+  (`metrics-exporter-prometheus`, statsd, OpenTelemetry, ...);
+  the engine just records, so no exporter dependency leaks
+  into `lattice-core`.
+- New private `metrics_compat` module. With the `metrics`
+  feature on, it forwards to the facade macros. With the
+  feature off, every recording function is a `pub(crate) const
+  fn` with an empty body, so call sites do not need their own
+  `cfg` guards and the optimiser deletes the calls entirely.
+- Book chapter 14 ("Metrics") documents every metric, the
+  feature flag, how to wire a recorder (with a Prometheus
+  example), how to choose histogram buckets, and the cost
+  model.
+
+### Changed
+- `flush` and `transaction` now record their wall time alongside
+  the existing put / delete / get / compaction call sites. A
+  no-op `flush` (memtable empty) returns early before
+  recording, so `lattice_flushes_total` only counts flushes
+  that produced an `SSTable`. A `transaction` aborted with
+  `Error::TransactionConflict` increments
+  `lattice_transaction_conflicts_total` instead of the commit
+  counter.
+- Chapter 13 ("Observability") replaces its closing "what is
+  not yet shipped" section with a one-paragraph cross-reference
+  to chapter 14, since metrics now ship.
+
+### Notes
+- Zero-cost when no recorder is installed at runtime: the
+  `metrics` macros expand to a load of a global atomic, a null
+  check, and an early return; the optimiser folds the rest.
+- Histograms use `Duration::as_secs_f64`. Bucket choice is the
+  exporter's job, not Lattice's; the chapter suggests a wide
+  range covering tens of microseconds (durable put on SSD) to
+  several seconds (cascade compaction).
+- Build the docs locally with `cargo doc --features
+  tokio,metrics --no-deps` if you want both the async wrapper
+  and the metric helpers in the same rendered page.
+
+[`metrics`]: https://docs.rs/metrics
+
 ## [1.7.0] - 2026-04-29
 
 ### Added
