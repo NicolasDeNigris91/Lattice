@@ -1,5 +1,11 @@
 # Lattice
 
+[![ci](https://github.com/NicolasDeNigris91/Lattice/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/NicolasDeNigris91/Lattice/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/lattice-core.svg)](https://crates.io/crates/lattice-core)
+[![docs.rs](https://docs.rs/lattice-core/badge.svg)](https://docs.rs/lattice-core)
+[![license](https://img.shields.io/crates/l/lattice-core.svg)](#license)
+[![msrv](https://img.shields.io/badge/msrv-1.85-blue.svg)](#)
+
 An LSM-tree key-value storage engine, written from scratch in Rust.
 
 Lattice is built for learning and portfolio purposes. It implements
@@ -29,11 +35,15 @@ delivered.
 ## Quickstart
 
 ```bash
-# Library
+# Library (sync)
 cargo add lattice-core
 
+# Library (async wrapper via tokio's blocking pool)
+cargo add lattice-core --features tokio
+
 # CLI
-cargo install --path crates/lattice-cli
+cargo install lattice-cli           # once published
+cargo install --path crates/lattice-cli  # from a checkout
 
 lattice put hello world
 lattice get hello

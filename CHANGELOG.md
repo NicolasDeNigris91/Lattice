@@ -7,6 +7,32 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-04-29
+
+### Added
+- CI matrix gains an `msrv` job that runs `cargo check
+  --workspace --all-targets --all-features` on the rust 1.85
+  toolchain, catching accidental use of newer std items before
+  a release.
+- README gets badges for CI status, crates.io version, docs.rs
+  link, license, and MSRV. The crates.io and docs.rs badges
+  start serving content the moment the workflow publishes the
+  crate (this tag is the trigger).
+- `CONTRIBUTING.md` documents the CI bar (fmt + clippy + test +
+  doc + MSRV check), the TDD discipline applied across M1 to
+  M5, the conventional-commits convention, and the dual-license
+  contribution clause.
+- README install snippet now includes the `--features tokio`
+  variant for the async wrapper from v1.5.0 and the `cargo
+  install lattice-cli` form that becomes available once this
+  tag publishes.
+
+### Notes
+- `cargo-semver-checks` will be added in a follow-up patch
+  release: the tool needs a previously-published version to
+  compare against, so it is most useful after the first publish
+  this tag triggers.
+
 ## [1.5.0] - 2026-04-29
 
 ### Added
@@ -357,7 +383,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   case to exercise replay.
 - Book chapters 1 (the write ahead log) and 2 (the memtable).
 
-[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v1.5.1...HEAD
+[1.5.1]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.5.1
 [1.5.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.5.0
 [1.4.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.4.0
 [1.3.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.3.0

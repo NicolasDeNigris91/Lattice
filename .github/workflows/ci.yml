@@ -70,6 +70,25 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  msrv:
+    name: msrv (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Lowest supported toolchain per `rust-version` in Cargo.toml.
+        # Compiling under it (with --all-features so the optional
+        # `tokio` wrapper is included) catches accidental use of
+        # newer std items before a release.
+        toolchain: ["1.85"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets --all-features
+
   book:
     name: mdbook build
     runs-on: ubuntu-latest
