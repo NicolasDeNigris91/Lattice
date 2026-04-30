@@ -8,7 +8,11 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
+documentation.workspace = true
 readme.workspace = true
+keywords = ["lsm-tree", "database", "cli", "kv", "embedded"]
+categories = ["command-line-utilities", "database-implementations"]
+include = ["src/**/*", "Cargo.toml"]
 
 [lints]
 workspace = true

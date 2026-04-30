@@ -7,6 +7,39 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `deny.toml` at the workspace root, plus a `cargo deny check`
+  job in CI. Audits advisories, licences (explicit allow list),
+  duplicate dependencies (warn), wildcard versions (deny), and
+  source registries (only the public crates.io). Superset of the
+  existing `cargo audit` job, which stays for a second opinion
+  on the advisory database.
+- Coverage CI job using `cargo-llvm-cov`. Prints a summary on
+  every run and uploads an `lcov.info` artifact (14-day
+  retention). Not gated; the artifact is for review.
+- `.github/dependabot.yml`. Weekly cargo and GitHub Actions
+  updates, grouped so dev-deps and patches each become a single
+  PR per week instead of a flood.
+- `.github/ISSUE_TEMPLATE/{bug_report,feature_request,config}.yml`
+  and `.github/PULL_REQUEST_TEMPLATE.md`. The PR template
+  mirrors the CI bar so contributors can pre-flight before
+  pushing.
+- `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1).
+
+### Changed
+- `Cargo.toml` polish for crates.io publishing: workspace gains
+  a `documentation = "https://docs.rs/lattice-core"` field
+  inherited by both crates; each crate gains an `include`
+  filter so `cargo publish` packages only sources and manifest,
+  not stray local files. `lattice-cli` gains its own `keywords`
+  and `categories` (the workspace defaults are library-shaped).
+- `CONTRIBUTING.md` adds the `cargo deny` and coverage rows to
+  the project bar and points to the new code of conduct.
+
+### Notes
+- No version bump. Pure infrastructure; the next feature
+  release rolls these in.
+
 ## [1.10.0] - 2026-04-30
 
 Closes a memory leak that landed in v1.6 and was deferred in

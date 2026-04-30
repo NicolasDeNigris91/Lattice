@@ -8,9 +8,17 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
+documentation.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
+# Limit the published artifact to source files plus the manifest.
+# `Cargo.toml` and the workspace `README.md` are auto-included via
+# the manifest and the `readme` field; the SPDX `license` field
+# carries the licence metadata for crates.io and docs.rs. Without
+# this filter, `cargo publish` packages every untracked file in
+# the crate directory.
+include = ["src/**/*", "Cargo.toml"]
 
 [lints]
 workspace = true
