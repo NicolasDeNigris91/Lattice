@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -193,6 +193,15 @@ struct Inner {
     wal: Mutex<Wal>,
     /// Pending non-durable WAL records since the last sync.
     pending_writes: AtomicUsize,
+    /// Monotonic per-write sequence used by transaction conflict
+    /// detection. Bumped under the WAL mutex on every successful
+    /// put or delete so it stays in lock-step with `last_writes`.
+    write_seq: AtomicU64,
+    /// Last `write_seq` at which each key was modified. Updated
+    /// under the WAL mutex on every successful put or delete.
+    /// Read by transaction commit to decide whether the
+    /// transaction's snapshot is still consistent.
+    last_writes: RwLock<BTreeMap<Vec<u8>, u64>>,
     /// Serialises flush and compact so two concurrent puts cannot
     /// race on `next_seq` or on the manifest write.
     mutation_lock: Mutex<()>,
@@ -393,6 +402,8 @@ impl Lattice {
             state: RwLock::new(state),
             wal: Mutex::new(wal),
             pending_writes: AtomicUsize::new(0),
+            write_seq: AtomicU64::new(0),
+            last_writes: RwLock::new(BTreeMap::new()),
             mutation_lock: Mutex::new(()),
             flush_threshold_bytes,
             compaction_threshold,
@@ -422,12 +433,13 @@ impl Lattice {
             key: key.to_vec(),
             value: value.to_vec(),
         };
-        self.append_entry(&entry, opts)?;
-        let LogEntry::Put { key, value } = entry else {
-            unreachable!()
+        let needs_flush = {
+            let mut wal = self.inner.wal.lock();
+            self.apply_entry_locked(&mut wal, &entry, opts)?
         };
-        self.inner.active.write().put(key, value);
-        self.maybe_flush()?;
+        if needs_flush {
+            self.flush()?;
+        }
         Ok(())
     }
 
@@ -441,12 +453,13 @@ impl Lattice {
     /// durable on return; non-durable deletes are not yet exposed.
     pub fn delete(&self, key: &[u8]) -> Result<()> {
         let entry = LogEntry::Delete { key: key.to_vec() };
-        self.append_entry(&entry, WriteOptions::default())?;
-        let LogEntry::Delete { key } = entry else {
-            unreachable!()
+        let needs_flush = {
+            let mut wal = self.inner.wal.lock();
+            self.apply_entry_locked(&mut wal, &entry, WriteOptions::default())?
         };
-        self.inner.active.write().delete(key);
-        self.maybe_flush()?;
+        if needs_flush {
+            self.flush()?;
+        }
         Ok(())
     }
 
@@ -462,32 +475,65 @@ impl Lattice {
         Ok(())
     }
 
-    fn append_entry(&self, entry: &LogEntry, opts: WriteOptions) -> Result<()> {
-        // The whole append-and-maybe-sync runs under the WAL mutex
-        // so the pending counter and the BufWriter stay consistent
-        // with each other. The lock is released as soon as the
-        // bytes are committed; the atomic reset that follows is
-        // observable from any thread without it.
-        let did_sync = {
-            let mut wal = self.inner.wal.lock();
-            wal.append_pending(entry)?;
-            if opts.durable {
+    /// Apply a single WAL entry under a pre-locked WAL guard.
+    /// Returns `true` if the active memtable now exceeds the flush
+    /// threshold (the caller must call `flush()` AFTER releasing
+    /// the WAL guard, since `flush()` re-acquires the WAL guard
+    /// internally for the truncate).
+    ///
+    /// This helper exists so that transaction commit can take the
+    /// WAL guard once and atomically check `last_writes` against the
+    /// transaction's snapshot before applying every staged write.
+    /// The bump of `write_seq` and the update of `last_writes`
+    /// happen here, both under the WAL mutex, so any concurrent
+    /// transaction commit that holds the same guard sees a
+    /// consistent (`write_seq`, `last_writes`) pair.
+    fn apply_entry_locked(
+        &self,
+        wal: &mut Wal,
+        entry: &LogEntry,
+        opts: WriteOptions,
+    ) -> Result<bool> {
+        wal.append_pending(entry)?;
+        let did_sync = if opts.durable {
+            wal.sync_pending()?;
+            true
+        } else {
+            let prior = self.inner.pending_writes.fetch_add(1, Ordering::AcqRel);
+            if prior + 1 >= self.inner.commit_batch {
                 wal.sync_pending()?;
                 true
             } else {
-                let prior = self.inner.pending_writes.fetch_add(1, Ordering::AcqRel);
-                if prior + 1 >= self.inner.commit_batch {
-                    wal.sync_pending()?;
-                    true
-                } else {
-                    false
-                }
+                false
             }
         };
         if did_sync {
             self.inner.pending_writes.store(0, Ordering::Release);
         }
-        Ok(())
+
+        // Track the per-key write sequence used by transaction
+        // conflict detection. The bump and the BTreeMap insert run
+        // under the WAL mutex held by the caller, so the pair is
+        // consistent for any other writer that takes the same lock.
+        let new_seq = self.inner.write_seq.fetch_add(1, Ordering::AcqRel) + 1;
+        let key_for_tracking = match entry {
+            LogEntry::Put { key, .. } | LogEntry::Delete { key } => key.clone(),
+        };
+        self.inner
+            .last_writes
+            .write()
+            .insert(key_for_tracking, new_seq);
+
+        // Apply to the memtable.
+        let needs_flush = {
+            let mut active = self.inner.active.write();
+            match entry {
+                LogEntry::Put { key, value } => active.put(key.clone(), value.clone()),
+                LogEntry::Delete { key } => active.delete(key.clone()),
+            }
+            active.approx_size() >= self.inner.flush_threshold_bytes
+        };
+        Ok(needs_flush)
     }
 
     /// Read the current value for `key`, or `None` if absent or deleted.
@@ -798,33 +844,63 @@ impl Lattice {
     /// Run a closure inside a snapshot-isolated transaction. Reads
     /// inside the closure see the database as of the transaction
     /// start, layered on top of the transaction's own staged
-    /// writes. On `Ok` return, every staged put and delete is
-    /// applied atomically; on `Err` (or panic, or early drop) the
+    /// writes. On `Ok` return, every staged write is applied
+    /// atomically after a conflict check; on `Err` (or panic) the
     /// staged writes are discarded.
+    ///
+    /// The commit aborts with [`Error::TransactionConflict`] if any
+    /// key in the transaction's read-set or write-set was modified
+    /// by another writer after the transaction's snapshot was
+    /// taken. The standard recovery is to retry the closure against
+    /// a fresh snapshot.
     pub fn transaction<F, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&mut Transaction<'_>) -> Result<R>,
     {
-        let mut tx = Transaction::new(self.snapshot());
+        let snapshot = self.snapshot();
+        let snapshot_seq = self.inner.write_seq.load(Ordering::Acquire);
+        let mut tx = Transaction::new(snapshot, snapshot_seq);
         let outcome = f(&mut tx)?;
-        // Apply the staged writes. They go through the regular put
-        // / delete path so the WAL records and the leveled state
-        // both reflect the changes consistently.
-        for (key, value) in &tx.write_set {
-            match value {
-                Some(v) => self.put(key, v)?,
-                None => self.delete(key)?,
-            }
-        }
-        Ok(outcome)
-    }
 
-    fn maybe_flush(&self) -> Result<()> {
-        let size = self.inner.active.read().approx_size();
-        if size >= self.inner.flush_threshold_bytes {
+        // Atomic check-then-apply under the WAL mutex. Holding it
+        // through both phases prevents any plain put or delete from
+        // advancing `write_seq` or `last_writes` between our check
+        // and our apply, so a concurrent overwrite cannot slip past
+        // the conflict guard.
+        let needs_flush = {
+            let mut wal = self.inner.wal.lock();
+
+            // Conflict check.
+            {
+                let last_writes = self.inner.last_writes.read();
+                for key in tx.read_set.iter().chain(tx.write_set.keys()) {
+                    if let Some(&last_seq) = last_writes.get(key)
+                        && last_seq > tx.snapshot_seq
+                    {
+                        return Err(Error::TransactionConflict);
+                    }
+                }
+            }
+
+            // Apply phase.
+            let mut needs_flush = false;
+            for (key, value) in &tx.write_set {
+                let entry = value.as_ref().map_or_else(
+                    || LogEntry::Delete { key: key.clone() },
+                    |v| LogEntry::Put {
+                        key: key.clone(),
+                        value: v.clone(),
+                    },
+                );
+                needs_flush |=
+                    self.apply_entry_locked(&mut wal, &entry, WriteOptions::default())?;
+            }
+            needs_flush
+        };
+        if needs_flush {
             self.flush()?;
         }
-        Ok(())
+        Ok(outcome)
     }
 
     fn maybe_compact(&self) -> Result<()> {

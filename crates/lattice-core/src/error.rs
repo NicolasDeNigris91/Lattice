@@ -27,4 +27,12 @@ pub enum Error {
     /// manifest).
     #[error("malformed format: {0}")]
     MalformedFormat(&'static str),
+
+    /// A transaction's commit was aborted because another writer
+    /// modified one of the keys in the transaction's read-set or
+    /// write-set after the snapshot was taken. Re-running the
+    /// transaction logic against a fresh snapshot is the standard
+    /// recovery path.
+    #[error("transaction conflict: a key in the read or write set changed since snapshot")]
+    TransactionConflict,
 }

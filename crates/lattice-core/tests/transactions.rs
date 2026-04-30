@@ -13,22 +13,28 @@ use tempfile::tempdir;
 fn transaction_isolated_read_view() {
     // A transaction snapshots the database at start. A concurrent
     // write through another handle clone must not be visible to
-    // reads issued inside the transaction.
+    // reads issued inside the transaction. The closure rolls back
+    // explicitly after the assertions: with v1.6's conflict
+    // detection, attempting to commit a transaction whose read-set
+    // intersects an outside write's keys would (correctly) abort
+    // with `TransactionConflict`. Snapshot isolation of the read
+    // path is what this test pins; the commit-conflict behaviour is
+    // covered separately.
     let dir = tempdir().unwrap();
     let db = Lattice::open(dir.path()).unwrap();
     db.put(b"k", b"v0").unwrap();
 
     let db_outside = db.clone();
-    db.transaction(|tx| {
+    let result = db.transaction(|tx| {
         let before = tx.get(b"k").unwrap();
         // Outside write through a clone after the snapshot.
         db_outside.put(b"k", b"v1").unwrap();
         let after = tx.get(b"k").unwrap();
         assert_eq!(before, Some(b"v0".to_vec()));
         assert_eq!(after, before, "snapshot must not see outside writes");
-        Ok(())
-    })
-    .unwrap();
+        Err::<(), _>(Error::Io(io::Error::other("explicit rollback")))
+    });
+    assert!(matches!(result, Err(Error::Io(_))));
 
     // Outside the transaction, the new value is live.
     assert_eq!(db.get(b"k").unwrap(), Some(b"v1".to_vec()));
@@ -146,6 +152,65 @@ fn read_only_transaction_commits_with_no_writes() {
 
     assert_eq!(value, Some(b"v".to_vec()));
     assert_eq!(db.get(b"k").unwrap(), Some(b"v".to_vec()));
+}
+
+#[test]
+fn concurrent_transactions_on_same_key_second_aborts_with_conflict() {
+    // Two transactions race on the same key. T1 starts, reads K
+    // (recording it in its read-set). T2 modifies K (a plain put,
+    // no transaction needed). T1 stages a put on K and commits. The
+    // commit must abort with `Error::TransactionConflict` because
+    // K's last write_seq is now greater than T1's snapshot_seq, and
+    // applying T1's put would silently overwrite T2's intervening
+    // change (the lost-update anomaly that v1.4 deferred and v1.6
+    // fixes).
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    let dir = tempdir().unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
+    db.put(b"k", b"v0").unwrap();
+
+    // Two-phase barrier: phase 1 is "T1 has read, now T2 writes",
+    // phase 2 is "T2 is done, now T1 commits".
+    let barrier = Arc::new(Barrier::new(2));
+
+    let t1 = {
+        let db = db.clone();
+        let barrier = Arc::clone(&barrier);
+        thread::spawn(move || {
+            db.transaction(|tx| {
+                assert_eq!(tx.get(b"k").unwrap(), Some(b"v0".to_vec()));
+                barrier.wait(); // tell T2 it can write now
+                barrier.wait(); // wait for T2 to finish
+                tx.put(b"k", b"v_t1");
+                Ok::<_, Error>(())
+            })
+        })
+    };
+
+    let t2 = {
+        let db = db.clone();
+        let barrier = Arc::clone(&barrier);
+        thread::spawn(move || {
+            barrier.wait(); // wait for T1 to read
+            db.put(b"k", b"v_t2").unwrap();
+            barrier.wait(); // tell T1 it can try to commit
+        })
+    };
+
+    let r1 = t1.join().unwrap();
+    t2.join().unwrap();
+
+    assert!(
+        matches!(r1, Err(Error::TransactionConflict)),
+        "T1 commit must abort with TransactionConflict, got {r1:?}",
+    );
+    assert_eq!(
+        db.get(b"k").unwrap(),
+        Some(b"v_t2".to_vec()),
+        "T2's write must remain the live value"
+    );
 }
 
 #[test]

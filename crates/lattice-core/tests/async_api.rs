@@ -5,7 +5,7 @@
 
 #![cfg(feature = "tokio")]
 
-use lattice_core::AsyncLattice;
+use lattice_core::{AsyncLattice, Error};
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -46,6 +46,29 @@ async fn async_scan_returns_prefix_filtered_pairs() {
             (b"alphabet".to_vec(), b"2".to_vec()),
         ]
     );
+}
+
+#[tokio::test]
+async fn async_transaction_commits_atomically() {
+    // The async transaction wrapper runs the closure on tokio's
+    // blocking pool. Reads observe the snapshot taken at start;
+    // writes apply atomically on `Ok`. After commit, every staged
+    // write is visible through the parent handle.
+    let dir = tempdir().unwrap();
+    let db = AsyncLattice::open(dir.path()).await.unwrap();
+    db.put(b"existing", b"keep").await.unwrap();
+
+    db.transaction(|tx| {
+        assert_eq!(tx.get(b"existing").unwrap(), Some(b"keep".to_vec()));
+        tx.put(b"a", b"1");
+        tx.delete(b"existing");
+        Ok::<_, Error>(())
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(db.get(b"a").await.unwrap(), Some(b"1".to_vec()));
+    assert_eq!(db.get(b"existing").await.unwrap(), None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

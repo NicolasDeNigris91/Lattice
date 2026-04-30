@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::Lattice;
 use crate::error::{Error, Result};
+use crate::transaction::Transaction;
 
 /// Async-friendly wrapper around [`Lattice`].
 ///
@@ -99,6 +100,34 @@ impl AsyncLattice {
     pub async fn compact(&self) -> Result<()> {
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || inner.compact())
+            .await
+            .map_err(join_to_err)?
+    }
+
+    /// Run a closure inside a snapshot-isolated transaction on
+    /// tokio's blocking pool.
+    ///
+    /// The closure itself is synchronous: it cannot `await` inside
+    /// the transaction body. This matches v1.5's "async-friendly"
+    /// model where the engine remains synchronous and only the
+    /// dispatch is asynchronous. For read-modify-write transactions
+    /// that do not need to await external calls (the vast majority),
+    /// this is the right shape; the closure runs on the blocking
+    /// pool and the calling tokio task stays free for other work.
+    ///
+    /// For workflows that need to await between a read and a write,
+    /// the pattern is to issue the reads, await whatever, and then
+    /// open a fresh transaction. v1.6's conflict detection on the
+    /// engine guarantees that the second transaction will abort
+    /// with [`Error::TransactionConflict`] if the data it relied on
+    /// changed in the meantime.
+    pub async fn transaction<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&mut Transaction<'_>) -> Result<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || inner.transaction(f))
             .await
             .map_err(join_to_err)?
     }
