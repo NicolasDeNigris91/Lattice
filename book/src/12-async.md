@@ -75,13 +75,37 @@ async caller has the `AsyncLattice` and needs to hand a `Lattice`
 clone to a function that has not yet been migrated to take an
 async handle.
 
-The transaction surface from chapter 11 does not yet have an async
-companion. The closure signature `FnOnce(&mut Transaction<'_>) ->
-Result<R>` does not compose with futures cleanly (the snapshot
-must outlive every awaited write inside the closure), and v1.5
-ships the simpler wrapper first. An async transaction landing in
-v1.6 will likely take a `for<'tx> AsyncFnOnce(&'tx mut
-AsyncTransaction<'_>)` and accept the lifetime gymnastics.
+v1.6 adds `AsyncLattice::transaction(|tx| { ... })` with the
+closure body remaining synchronous. The whole transaction (read,
+stage, commit) runs on tokio's blocking pool via
+`spawn_blocking`; the calling tokio task stays free, but the
+closure cannot `await` between a read and a write.
+
+For workflows that need to await mid-transaction, the recommended
+pattern is:
+
+```rust
+let snapshot_value = db.transaction(|tx| {
+    Ok::<_, lattice_core::Error>(tx.get(b"counter")?.unwrap_or_default())
+}).await?;
+
+let new_value = remote_increment(snapshot_value).await?;
+
+db.transaction(|tx| {
+    let current = tx.get(b"counter")?.unwrap_or_default();
+    if current != snapshot_value {
+        return Err(Error::TransactionConflict);
+    }
+    tx.put(b"counter", &new_value);
+    Ok::<_, lattice_core::Error>(())
+}).await?;
+```
+
+The conflict detection from chapter 11 guarantees the second
+transaction aborts with `Error::TransactionConflict` if another
+writer touched `counter` while the await was in flight, so the
+two-step pattern preserves snapshot semantics across the await
+boundary without the closure itself needing to be a future.
 
 ## Tests
 

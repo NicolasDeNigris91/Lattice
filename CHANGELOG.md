@@ -7,6 +7,67 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-04-29
+
+Closes both deferrals from v1.4 (transaction conflict detection)
+and v1.5 (async transaction wrapper).
+
+### Added
+- Transaction conflict detection. The engine now stamps every put
+  and delete with a monotonic `write_seq` and tracks the last
+  `write_seq` at which each key was modified in `last_writes`.
+  `Transaction` records `snapshot_seq` at start and tracks every
+  key it reads in a `read_set`. On commit, the engine takes the
+  WAL mutex once and atomically (a) checks every key in the
+  read-set or write-set against `last_writes` and (b) applies the
+  staged writes through a new `apply_entry_locked` helper. If any
+  key was modified after the transaction's snapshot, the commit
+  aborts with `Error::TransactionConflict`. The held WAL mutex
+  prevents any concurrent put or delete from racing the check
+  against the apply, which was the lock-discipline gap the v1.4
+  CHANGELOG called out.
+- New `Error::TransactionConflict` variant.
+- `AsyncLattice::transaction(|tx| { ... })`: closure-shaped
+  transaction running on tokio's blocking pool. The closure body
+  is synchronous (no `await` inside the transaction); read-then-
+  await-then-retry is the documented pattern for workflows that
+  need to await between reads and writes.
+- New `concurrent_transactions_on_same_key_second_aborts_with_
+  conflict` test uses a `std::sync::Barrier` to deterministically
+  interleave a read inside one transaction with an outside write,
+  then asserts the commit aborts with `Error::TransactionConflict`
+  and the outside write remains live.
+- New `async_transaction_commits_atomically` test pins the async
+  wrapper's commit semantics.
+
+### Changed
+- `Transaction::get` records the looked-up key in the read-set.
+- `Transaction::new` now takes a `snapshot_seq` and initialises a
+  `read_set: BTreeSet<Vec<u8>>`. The struct is `pub(crate)`
+  except for the public methods, so this is not a public API
+  change.
+- The internal `append_entry` helper has been replaced by
+  `apply_entry_locked`, which assumes the caller holds the WAL
+  mutex. `put_with`, `delete`, and the transaction commit all
+  funnel through it. `apply_entry_locked` returns a `needs_flush`
+  flag so the caller can release the WAL mutex before invoking
+  `flush()` (which re-acquires the WAL mutex internally).
+- `transaction_isolated_read_view` test now rolls back explicitly
+  via `Err`, because under v1.6's conflict detection, attempting
+  to commit after the closure has read a key and an outside
+  writer has modified that key would (correctly) abort. The
+  rollback isolates the test to what it was meant to assert
+  (snapshot-isolated reads), with the conflict-detection
+  behaviour pinned by the new dedicated test.
+
+### Notes
+- 73 tests pass workspace-wide with `--features tokio` (60 baseline
+  + 1 new tx + 4 + 1 new async tx + the existing M3 tests). fmt
+  clean, clippy strict clean both with and without the `tokio`
+  feature, doc with `-D warnings` clean.
+- The on-disk format is unchanged. v1.5 directories open under
+  v1.6 unchanged, and vice versa.
+
 ## [1.5.1] - 2026-04-29
 
 ### Added
@@ -383,7 +444,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   case to exercise replay.
 - Book chapters 1 (the write ahead log) and 2 (the memtable).
 
-[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v1.5.1...HEAD
+[Unreleased]: https://github.com/NicolasDeNigris91/Lattice/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.6.0
 [1.5.1]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.5.1
 [1.5.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.5.0
 [1.4.0]: https://github.com/NicolasDeNigris91/Lattice/releases/tag/v1.4.0

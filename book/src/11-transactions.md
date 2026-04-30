@@ -61,35 +61,48 @@ closure's return value is the commit signal. This shape is
 adopted from `sled` and `redb` and matches the way Rust callers
 already think about scoped resource lifetimes.
 
-## What is missing: conflict detection
+## Conflict detection (v1.6)
 
-v1.4 does not yet detect conflicts between concurrent transactions
-that touch the same key. If two transactions stage a write to key
-`K`, both see the original value during their reads, both stage
-their own write, and both commit; the second commit overwrites
-the first. This is the **lost-update** anomaly that real
-snapshot-isolation engines prevent.
+v1.4 deferred conflict detection because the lock-discipline
+change to keep the check and the apply atomic with respect to
+plain puts deserved its own milestone. v1.6 ships it.
 
-The right fix is a per-key write-seq counter on the engine:
+The engine stamps every put and delete with a monotonic
+`write_seq`, bumped under the WAL mutex, and tracks the last
+`write_seq` at which each key was modified in a `last_writes`
+map. `Transaction` records the engine's `write_seq` at start
+(`snapshot_seq`) and tracks every key it reads in a `read_set`.
+On commit, the engine takes the WAL mutex once and atomically:
 
-- The engine stamps every put and delete with a monotonic
-  `write_seq`.
-- A transaction records the engine's `write_seq` at start
-  (`snapshot_seq`) and tracks every key it reads or stages.
-- At commit time, before the apply step, the engine acquires the
-  write lock and checks every key in the read-set or write-set:
-  if any key's last `write_seq` is greater than the transaction's
-  `snapshot_seq`, the commit aborts with
-  `Error::TransactionConflict`. Otherwise the apply runs
-  atomically (the held write lock keeps any plain put from
-  racing the check).
+1. Walks every key in the read-set and the write-set.
+2. If any key's `last_writes` entry exceeds the transaction's
+   `snapshot_seq`, the commit aborts with
+   [`Error::TransactionConflict`].
+3. Otherwise it applies every staged write through an internal
+   `apply_entry_locked` helper that assumes the caller already
+   holds the WAL mutex. The held mutex stops any concurrent
+   plain put or delete from racing the check against the apply.
 
-Implementing this cleanly requires reshaping the put / delete
-internals so the conflict check and the WAL append can share one
-held wal-mutex without re-entrancy issues. That refactor is
-substantial and lands in v1.5; v1.4 ships the read isolation,
-the staged writes, and the atomic apply, with the conflict
-detection clearly listed as the next step.
+Recovery: catch `Error::TransactionConflict` and retry the
+closure. The retried transaction will see the up-to-date data
+and either succeed or abort again on the next conflict.
+
+Pinned by `concurrent_transactions_on_same_key_second_aborts_
+with_conflict`, which uses a `std::sync::Barrier` to coordinate
+two threads deterministically: T1 reads K, T2 writes K, T1 tries
+to commit. The test asserts T1 aborts with
+`TransactionConflict` and T2's value remains live.
+
+## What is missing
+
+Async transactions in v1.6 ship as `AsyncLattice::transaction`
+(see chapter 12). The closure body itself is synchronous; awaiting
+inside the transaction body would require a different shape that
+v1.6 does not yet provide. The recommended pattern for workflows
+that need to await mid-transaction is to do the reads, await
+whatever, and open a fresh transaction; the conflict detection
+above guarantees the second transaction will abort if the data
+changed in the meantime.
 
 ## Tests
 

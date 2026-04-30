@@ -21,16 +21,16 @@ design decision in plain language.
 
 ## Status
 
-v1.5.0. Five didactic phases plus durability hardening (v1.0.1),
+v1.6.0. Five didactic phases plus durability hardening (v1.0.1),
 opt-in group commit (v1.1.0), `Send + Sync + Clone` with parallel
 reads and a background flusher thread (v1.2.0), size-tiered
 leveled compaction with manifest v2 (v1.3.0), snapshot-isolated
-transactions (v1.4.0), and an optional tokio wrapper
-(`AsyncLattice`, behind the `tokio` feature) (v1.5.0). Seventy one
-tests across integration, property, contract, concurrency,
-transaction, and async suites, full mdBook published alongside
-the code. See the [CHANGELOG](CHANGELOG.md) for what each tag
-delivered.
+transactions (v1.4.0), an optional tokio wrapper (v1.5.0), and
+transaction conflict detection plus an async transaction
+companion (v1.6.0). Seventy three tests across integration,
+property, contract, concurrency, transaction, and async suites,
+full mdBook published alongside the code. See the
+[CHANGELOG](CHANGELOG.md) for what each tag delivered.
 
 ## Quickstart
 
@@ -66,6 +66,8 @@ lattice compact
 | v1.3.0 | Manifest v2, size-tiered leveled compaction             |
 | v1.4.0 | Transactions: snapshot isolation, atomic commit         |
 | v1.5.0 | `AsyncLattice` behind the `tokio` feature flag          |
+| v1.5.1 | Publish-readiness polish: MSRV CI + badges + CONTRIB    |
+| v1.6.0 | Transaction conflict detection + AsyncTransaction       |
 
 ## Deployment
 
