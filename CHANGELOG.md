@@ -8,24 +8,6 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- `Lattice::config() -> Config` returns the runtime configuration
-  (flush threshold, compaction threshold, commit window, commit
-  batch). Companion to `Lattice::stats`: stats reports
-  gauge-shaped operational state, config reports the static
-  knobs the engine is running with. Useful for an operator
-  verifying the engine is configured the way they think it is,
-  and for tests that need to assert a builder value actually
-  stuck. The new `pub struct Config` derives Debug, Clone,
-  Copy, PartialEq, Eq.
-- `Lattice::scan_range(start, end) -> ScanIter` is a streaming
-  range-bounded scan. Bounds are inclusive-exclusive
-  (`[start, end)`) to match the `a..b` Rust range idiom;
-  `start = None` means "from the beginning of the keyspace",
-  `end = None` means "to the end". Sits alongside
-  `scan_iter(prefix)` for the two natural scan shapes.
-  `tests/scan_range.rs` contract suite (7 tests) pins the
-  bound semantics, the unbounded sides, the empty-range edge
-  case, the multi-tier merge, and tombstone filtering.
 - `deny.toml` at the workspace root, plus a `cargo deny check`
   job in CI. Audits advisories, licences (explicit allow list),
   duplicate dependencies (warn), wildcard versions (deny), and
@@ -167,6 +149,50 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ### Notes
 - No version bump. Pure infrastructure; the next feature
   release rolls these in.
+
+## [1.16.0] - 2026-05-01
+
+Two API additions that round out the operational and
+range-iteration surfaces. `Lattice::config()` returns the
+runtime configuration as an owned `Config` value (companion to
+the `stats()` snapshot from v1.15: stats is gauges, config is
+knobs). `Lattice::scan_range(start, end)` adds the
+inclusive-exclusive range walk that pairs with the
+prefix-shaped `scan_iter` from v1.12.
+
+### Added
+- `Lattice::config() -> Config`. New public type
+  (`pub struct Config`, `Debug + Clone + Copy + PartialEq + Eq`)
+  exposing `flush_threshold_bytes`, `compaction_threshold`,
+  `commit_window`, and `commit_batch`. Cheap to call (one
+  struct build, no locks). Useful for an operator verifying
+  the engine is configured the way they think it is, and for
+  tests that need to assert a builder value actually stuck.
+  `Inner` gains a `commit_window: Duration` field so the
+  builder value is preserved past spawn time (the flusher
+  thread had captured it via `move` but the value was not
+  stored anywhere readable).
+- `Lattice::scan_range(start, end) -> ScanIter`. Streaming
+  range-bounded scan that yields visible `(key, value)` pairs
+  whose key falls within `[start, end)`, in strictly
+  increasing key order. Bounds are inclusive-exclusive to
+  match the `a..b` Rust range idiom; `start = None` means
+  "from the beginning of the keyspace", `end = None` means
+  "to the end". `ScanIter` gains internal `start_bound` and
+  `end_bound` fields, applied at the heap-pop site with
+  early-termination when the upper bound is hit (the merge
+  yields keys in increasing order, so every later key is
+  also out of range). The new `ScanIter::with_bounds`
+  constructor is the shared codepath; `ScanIter::new`
+  delegates to it with both bounds set to `None` so the v1.12
+  `scan_iter(prefix)` contract is unchanged.
+- `tests/scan_range.rs` contract suite (7 tests):
+  inclusive-exclusive semantics, unbounded-start,
+  unbounded-end, unbounded-both (equivalent to `scan`),
+  empty-range edges (start == end and start > end),
+  multi-tier merge, and tombstone filtering.
+- `tests/stats.rs` adds `config_reports_builder_values_after_open`
+  pinning the round-trip from `LatticeBuilder` to `Lattice::config()`.
 
 ## [1.15.0] - 2026-05-01
 

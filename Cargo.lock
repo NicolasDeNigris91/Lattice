@@ -515,7 +515,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-cli"
-version = "1.15.0"
+version = "1.16.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-core"
-version = "1.15.0"
+version = "1.16.0"
 dependencies = [
  "bincode",
  "bytes",
@@ -548,7 +548,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-loom-tests"
-version = "1.15.0"
+version = "1.16.0"
 dependencies = [
  "lattice-core",
  "loom",
