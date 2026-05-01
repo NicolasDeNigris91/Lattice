@@ -39,6 +39,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "engine_history"
+path = "fuzz_targets/engine_history.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 # Empty `[workspace]` makes this an independent package, not a
 # member of the parent Lattice workspace. Without it, the fuzz

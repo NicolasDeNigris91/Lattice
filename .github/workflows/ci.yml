@@ -134,7 +134,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [wal_open, sstable_open, manifest_open]
+        target: [wal_open, sstable_open, manifest_open, engine_history]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
