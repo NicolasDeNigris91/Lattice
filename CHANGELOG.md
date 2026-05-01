@@ -58,6 +58,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   per Pages convention (the latest commit wins). Requires
   "Source: GitHub Actions" in the repository's Pages settings
   before the first deploy.
+- `cargo public-api` workflow at
+  `.github/workflows/public-api.yml`. Runs on every PR that
+  touches `lattice-core` sources or manifests. Diffs the PR's
+  public API against the base branch and uploads the result as
+  a 30-day artifact. Informational, not gating: a real API
+  change is fine, the goal is to make sure it is intentional
+  and visible during review. Uses nightly to walk rustdoc's
+  JSON output, which is the only way `cargo-public-api` can
+  see private-to-public changes.
 - Weekly `cargo-mutants` sweep workflow at
   `.github/workflows/mutants.yml`. Runs Sunday 03:00 UTC and
   uploads `mutants.out/` as a 30-day artifact. Informational

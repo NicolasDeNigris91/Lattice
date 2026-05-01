@@ -1,0 +1,48 @@
+name: public-api
+
+on:
+  pull_request:
+    paths:
+      - "crates/lattice-core/src/**"
+      - "crates/lattice-core/Cargo.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diff:
+    name: cargo public-api diff
+    runs-on: ubuntu-latest
+    # Informational: surfaces API drift on every PR but never
+    # gates. A real public API change is fine; the goal is to
+    # make sure it is intentional and visible in the PR review.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # cargo-public-api needs nightly to walk rustdoc's JSON
+      # output. The diff itself is computed with the stable
+      # workspace, so this is the only nightly step.
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-public-api
+
+      - name: Diff PR's public API against base branch
+        run: |
+          cargo public-api -p lattice-core \
+            diff --deny=all "${{ github.event.pull_request.base.sha }}..HEAD" \
+            > public-api-diff.txt 2>&1 || true
+
+      - name: Upload diff as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-api-diff
+          path: public-api-diff.txt
+          retention-days: 30
