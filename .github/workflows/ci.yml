@@ -109,6 +109,43 @@ jobs:
           name: lcov
           path: lcov.info
           retention-days: 14
+      # Optional: forward to Codecov when a CODECOV_TOKEN secret
+      # is configured. Skipped silently when absent so external
+      # contributors' fork PRs do not fail on a missing secret.
+      - name: Upload to Codecov
+        if: ${{ env.CODECOV_TOKEN != '' }}
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  miri:
+    name: miri (nightly, warn-only)
+    runs-on: ubuntu-latest
+    # Miri catches undefined behaviour and aliasing violations.
+    # The job is informational; failures show up in the run but do
+    # not block CI. Lattice is `forbid(unsafe_code)`, so any miri
+    # finding here is either a bug in a dependency or a Stacked
+    # Borrows violation in std that miri considers diagnostic.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - name: Setup miri
+        run: cargo miri setup
+      # Scope: lib unit tests only. Integration tests touch the
+      # filesystem, which miri can run with -Zmiri-disable-isolation
+      # but the wall-clock cost is prohibitive for a per-PR job.
+      - name: Run unit tests under miri
+        run: cargo miri test --workspace --lib
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-permissive-provenance"
 
   msrv:
     name: msrv (${{ matrix.toolchain }})

@@ -16,7 +16,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   on the advisory database.
 - Coverage CI job using `cargo-llvm-cov`. Prints a summary on
   every run and uploads an `lcov.info` artifact (14-day
-  retention). Not gated; the artifact is for review.
+  retention). Not gated; the artifact is for review. Optional
+  Codecov upload step that skips silently when no
+  `CODECOV_TOKEN` secret is configured, so external
+  contributors' fork PRs do not fail on a missing secret.
+- `miri` CI job, nightly toolchain, warn-only. Catches
+  undefined behaviour and aliasing violations in the lib unit
+  tests (the bloom and manifest tests, plus the new
+  trim tests). The job is informational; failures appear in
+  the run but do not block CI. Lattice is
+  `forbid(unsafe_code)`, so any miri finding here is a
+  dependency or std diagnostic, not a project bug.
 - `.github/dependabot.yml`. Weekly cargo and GitHub Actions
   updates, grouped so dev-deps and patches each become a single
   PR per week instead of a flood.
