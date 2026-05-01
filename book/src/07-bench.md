@@ -43,9 +43,10 @@ of eight bytes plus an eleven-byte fixed value:
 **`sequential_write_10k` at 994 µs per write.** This is dominated by
 `fsync` per put. The WAL is doing exactly what its contract says: a
 single write that survives a power loss costs roughly one disk
-synchronisation. A real-world workload with group commit (Phase 5+)
-would amortise this; Phase 1 chose the simpler durability story and is
-paying for it transparently.
+synchronisation. A real-world workload with group commit (shipped in v1.1 as
+`WriteOptions { durable: false }`) amortises this across a batch;
+Phase 1 chose the simpler durability story and is paying for it
+transparently.
 
 **`random_read_hits_10k` at 14.7 µs per hit.** After the flush, the
 memtable is empty and every probe lands on the SSTable. The cost is

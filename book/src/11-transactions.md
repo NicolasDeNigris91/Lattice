@@ -100,18 +100,24 @@ ever written kept an entry forever, so a long-running process
 that touches a wide key set leaks memory in proportion to the
 total distinct-key history.
 
-v1.10 closes the leak. `Inner` gains an `active_tx` multiset
-keyed by `snapshot_seq`. A new `ActiveTxGuard` registers the
-transaction's `snapshot_seq` under `active_tx.lock()` at
-transaction start and decrements on drop, including panic
-unwinding. Every `put`, `delete`, and transaction commit calls
-`maybe_trim_last_writes` after the WAL mutex is released. The
-trim is a no-op below `LAST_WRITES_TRIM_THRESHOLD` (1024
-entries); above the threshold, it reads the smallest
-`snapshot_seq` from `active_tx` and retains only entries whose
-`seq` strictly exceeds that cutoff. When no transaction is in
-flight, the cutoff is the current `write_seq`, so the map is
-cleared in full.
+v1.10 closes the leak by adding an `active_tx` multiset keyed by
+`snapshot_seq`. A new `ActiveTxGuard` registers the transaction's
+`snapshot_seq` under `active_tx.lock()` at transaction start and
+decrements on drop, including panic unwinding. Every `put`,
+`delete`, and transaction commit calls `maybe_trim_last_writes`
+after the WAL mutex is released. The trim is a no-op below
+`LAST_WRITES_TRIM_THRESHOLD` (1024 entries); above the threshold,
+it reads the smallest `snapshot_seq` from `active_tx` and retains
+only entries whose `seq` strictly exceeds that cutoff. When no
+transaction is in flight, the cutoff is the current `write_seq`,
+so the map is cleared in full.
+
+v1.11 moves the `(write_seq, last_writes, active_tx)` trio
+behind `ConflictTracker` at `Inner::tracker`; the state now lives
+in `crates/lattice-core/src/conflict_tracker.rs` and is exercised
+under every legal interleaving of two and three threads by the
+loom suite in `lattice-loom-tests`. The behaviour described above
+is unchanged.
 
 The soundness invariant is "an entry that could still trigger
 a conflict for an in-flight or future transaction must
