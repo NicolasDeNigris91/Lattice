@@ -41,11 +41,16 @@ compaction"). Three open questions remain for a future release:
   fire-and-forget use `compact_async`; callers that want a
   blocking wait accept the wait. A `wait_timeout` variant is
   a v2.x stretch goal.
-- **Loom coverage**: the new thread plus condvar plus Mutex
-  state machine needs a loom test exercising the
-  flush -> compaction-trigger -> compaction-completion ->
-  manifest-install path. Pending; the existing
-  `lattice-loom-tests` infrastructure is in place.
+
+The earlier "loom coverage" follow-up has shipped: the loom
+suite under `lattice-loom-tests` now drives the compactor's
+state machine. `wait_returns_after_paired_schedule_and_finish`
+pins liveness (a `wait_for(N)` paired with a `schedule()` and
+worker `finish(N, Ok)` returns under every interleaving), and
+`shutdown_wakes_pending_waiter` pins the
+shutdown-drains-waiters invariant (a `shutdown()` mid-wait
+must wake the blocked waiter rather than leave it parked).
+Chapter 9 covers the loom infrastructure.
 
 ## 2. SkipMap memtable
 
@@ -53,15 +58,33 @@ compaction"). Three open questions remain for a future release:
 
 Today the memtable is a `BTreeMap<Vec<u8>, Option<Vec<u8>>>`
 behind an `RwLock`. Reads share the lock; writes serialise on
-it. Under a heavy write workload the lock is the critical-path
-bottleneck. Multiple concurrent puts cannot proceed in parallel
-even though the underlying data structure could in principle
-support it.
+it. The intuition is that under a heavy write workload the
+memtable lock is the critical-path bottleneck and a lock-free
+skip-list (the `crossbeam-skiplist::SkipMap`) would remove it.
 
-A lock-free skip-list (the `crossbeam-skiplist::SkipMap`)
-removes the writer lock entirely. Writers update local nodes;
-readers see a consistent snapshot via epoch-based reclamation.
-Per-key contention drops to the cost of one CAS.
+### Architectural finding
+
+A second-pass read of the put path shows that the memtable
+write lock is **not** the contention point on a heavy write
+workload. `Lattice::put` runs through `apply_entry_locked`,
+which holds the WAL mutex (`self.inner.wal.lock()`) for the
+entire critical section: the WAL append, the WAL sync, the
+`tracker.record_write`, and the memtable `active.write()` plus
+insert. Concurrent writers serialise on the WAL mutex *before*
+they ever reach the memtable lock, so the memtable lock is
+uncontended for them.
+
+A SkipMap memtable in isolation would therefore not move the
+needle. To actually parallelise writes the WAL itself has to be
+restructured (per-thread WAL shards, group commit with
+contention-free append, or an entirely different log
+structure). The memtable swap is the second step of that
+multi-release sequence, not a single-shot improvement.
+
+This deferral is upgraded from "bench-first decision" to "wait
+for WAL parallelisation design". The implementation sketch
+below is preserved for that future release; the bench-first
+gate still applies (the win must show up on the dashboard).
 
 ### Proposal
 

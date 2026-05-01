@@ -13,6 +13,14 @@
 mod async_api;
 mod bloom;
 mod compaction;
+// `compactor` is internal to the engine; the loom test crate
+// needs cross-crate access to drive its model checks. Same trick
+// as `conflict_tracker`: flip the visibility to `pub` only under
+// `--cfg loom` so default builds keep the symbol crate-private
+// and `cargo public-api` does not register it.
+#[cfg(loom)]
+pub mod compactor;
+#[cfg(not(loom))]
 mod compactor;
 // `conflict_tracker` is internal to the engine, but the `loom` test
 // crate needs cross-crate access to drive its model checks. The

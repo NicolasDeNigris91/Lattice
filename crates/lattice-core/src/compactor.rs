@@ -40,6 +40,14 @@
 //! invariants pinned (no waiter sees `completed > requested`,
 //! shutdown drains all pending waiters, no thread leak).
 
+// The parent module is declared `pub` under `--cfg loom` so the
+// `lattice-loom-tests` crate can drive the state machine, and
+// `pub(crate)` otherwise. The `pub` items below are deliberately
+// reachable from outside the crate under loom; the
+// `unreachable_pub` lint cannot see that and would otherwise
+// fire on every default build.
+#![allow(unreachable_pub)]
+
 #[cfg(loom)]
 use loom::sync::atomic::AtomicU64;
 #[cfg(loom)]
@@ -64,7 +72,7 @@ use crate::error::{Error, Result};
 /// compactor thread. Wrapped in an `Arc` so the thread can hold a
 /// `Weak` to it (and exit when the last `Arc<Inner>` drops).
 #[derive(Debug)]
-pub(crate) struct CompactorShared {
+pub struct CompactorShared {
     /// Mutex-guarded counters and error slot. `parking_lot::Mutex`
     /// in production builds; `loom::sync::Mutex` under `--cfg loom`
     /// so the loom suite can shadow it.
@@ -76,7 +84,7 @@ pub(crate) struct CompactorShared {
     /// "is there work to do?" check the worker does on the hot
     /// path. Reads are `Acquire`; the writer holds `state` and
     /// publishes with `Release`.
-    pub(crate) latest_request: AtomicU64,
+    pub latest_request: AtomicU64,
 }
 
 #[derive(Debug, Default)]
@@ -97,7 +105,7 @@ impl CompactorShared {
     /// Construct an unwrapped instance. The caller wraps it in
     /// whichever `Arc` flavour they need (`std::sync::Arc` for the
     /// engine; `loom::sync::Arc` for the loom suite).
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             state: Mutex::new(CompactorState::default()),
             cv: Condvar::new(),
@@ -108,7 +116,7 @@ impl CompactorShared {
     /// Schedule a new compaction round. Bumps the request
     /// generation under the state lock, publishes the new value
     /// to `latest_request`, and wakes the worker.
-    pub(crate) fn schedule(&self) -> u64 {
+    pub fn schedule(&self) -> u64 {
         let generation = {
             let mut state = lock(&self.state);
             state.requested_generation += 1;
@@ -125,7 +133,7 @@ impl CompactorShared {
     /// from a failed round, if any. The error is left in place so
     /// other waiters at the same generation see it; the next
     /// successful round clears it.
-    pub(crate) fn wait_for(&self, target: u64) -> Result<()> {
+    pub fn wait_for(&self, target: u64) -> Result<()> {
         let mut state = lock(&self.state);
         while !state.shutdown && state.completed_generation < target {
             #[cfg(not(loom))]
@@ -146,7 +154,7 @@ impl CompactorShared {
     /// Worker entry point: wait for a request, return the captured
     /// generation. Returns `None` when the compactor is shutting
     /// down and the worker should exit.
-    pub(crate) fn next_request(&self) -> Option<u64> {
+    pub fn next_request(&self) -> Option<u64> {
         let mut state = lock(&self.state);
         while !state.shutdown && state.requested_generation == state.completed_generation {
             #[cfg(not(loom))]
@@ -166,7 +174,7 @@ impl CompactorShared {
     /// completed, store any error, wake every waiter. Drops the
     /// state guard before notifying so woken waiters do not
     /// immediately re-block on the lock we are about to release.
-    pub(crate) fn finish(&self, target: u64, result: Result<()>) {
+    pub fn finish(&self, target: u64, result: Result<()>) {
         {
             let mut state = lock(&self.state);
             if state.completed_generation < target {
@@ -184,7 +192,7 @@ impl CompactorShared {
     /// every waiter so an in-flight `wait()` does not block forever
     /// after the worker thread is gone. Same drop-before-notify
     /// pattern as `finish`.
-    pub(crate) fn shutdown(&self) {
+    pub fn shutdown(&self) {
         {
             let mut state = lock(&self.state);
             state.shutdown = true;
