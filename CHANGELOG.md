@@ -7,17 +7,6 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Changed
-- API ergonomics: `Lattice::{put, put_with, delete, get}`,
-  `Snapshot::get`, and `Transaction::{get, put, delete}` now
-  accept `impl AsRef<[u8]>` for keys and values. Existing
-  callers compile unchanged: `&[u8]`, `&[u8; N]`, `&Vec<u8>`,
-  `Vec<u8>`, `Box<[u8]>`, and `&str::as_bytes()` all impl
-  `AsRef<[u8]>` and resolve through the same monomorphic inner
-  body. The generic wrapper is a one-line forward, so binary
-  size impact is bounded by call-site count rather than by
-  generic-instantiation cost.
-
 ### Added
 - `deny.toml` at the workspace root, plus a `cargo deny check`
   job in CI. Audits advisories, licences (explicit allow list),
@@ -160,6 +149,31 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ### Notes
 - No version bump. Pure infrastructure; the next feature
   release rolls these in.
+
+## [1.14.0] - 2026-05-01
+
+API ergonomics. The public read/write surface (`put`, `put_with`,
+`delete`, `get` on `Lattice`; `get` on `Snapshot`; `get`, `put`,
+`delete` on `Transaction`) now accepts `impl AsRef<[u8]>` for
+keys and values, so callers can pass byte slices, byte arrays,
+owned `Vec<u8>`, `Cow<'_, [u8]>`, `Box<[u8]>`, or
+`&str::as_bytes()` interchangeably. The change is source-
+compatible: every existing caller in the workspace, tests,
+benches, and examples compiles unchanged.
+
+### Changed
+- `Lattice::put`, `Lattice::put_with`, `Lattice::delete`,
+  `Lattice::get`, `Snapshot::get`, `Transaction::get`,
+  `Transaction::put`, `Transaction::delete` all generalised
+  from `&[u8]` to `impl AsRef<[u8]>` for keys and values. The
+  pattern is a one-line generic wrapper that forwards to a
+  monomorphic inner body, so binary size impact is bounded by
+  call-site count rather than full generic instantiation. The
+  instrumentation, metrics, and inner code paths are unchanged.
+- 24 redundant borrows across 8 test, bench, and example files
+  cleaned up by `cargo clippy --fix` (`&i.to_be_bytes()` becomes
+  `i.to_be_bytes()`); behaviour identical, call sites read
+  cleaner.
 
 ## [1.13.0] - 2026-05-01
 
