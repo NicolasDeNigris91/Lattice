@@ -309,6 +309,26 @@ fn flusher_loop(weak: Weak<Inner>, window: Duration) {
 /// multiple threads can hold a handle and read concurrently. Writes
 /// (put, delete) serialise behind a single WAL mutex; reads run in
 /// parallel.
+///
+/// # Example
+///
+/// ```
+/// use lattice_core::Lattice;
+///
+/// let dir = tempfile::tempdir()?;
+/// let db = Lattice::open(dir.path())?;
+/// db.put(b"hello", b"world")?;
+/// assert_eq!(db.get(b"hello")?.as_deref(), Some(b"world".as_slice()));
+///
+/// // Cloning is cheap; both handles see the same database.
+/// let db_for_reader = db.clone();
+/// std::thread::spawn(move || {
+///     let _ = db_for_reader.get(b"hello");
+/// })
+/// .join()
+/// .unwrap();
+/// # Ok::<_, Box<dyn std::error::Error>>(())
+/// ```
 pub struct Lattice {
     inner: Arc<Inner>,
 }
@@ -355,6 +375,23 @@ impl Lattice {
     /// bootstraps one), opens the listed `SSTable`s, deletes any orphan
     /// `*.sst` files left over from a crash mid-compaction, then
     /// replays the write-ahead log.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use lattice_core::Lattice;
+    ///
+    /// let dir = tempfile::tempdir()?;
+    /// let db = Lattice::open(dir.path())?;
+    /// db.put(b"k", b"v")?;
+    /// drop(db);
+    ///
+    /// // Reopen against the same path: every durable write replays
+    /// // from the WAL.
+    /// let db = Lattice::open(dir.path())?;
+    /// assert_eq!(db.get(b"k")?.as_deref(), Some(b"v".as_slice()));
+    /// # Ok::<_, Box<dyn std::error::Error>>(())
+    /// ```
     #[instrument(level = "info", skip_all, fields(path = %path.as_ref().display()))]
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::builder(path).open()
@@ -905,6 +942,28 @@ impl Lattice {
     /// by another writer after the transaction's snapshot was
     /// taken. The standard recovery is to retry the closure against
     /// a fresh snapshot.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use lattice_core::{Error, Lattice};
+    ///
+    /// let dir = tempfile::tempdir()?;
+    /// let db = Lattice::open(dir.path())?;
+    ///
+    /// db.transaction(|tx| {
+    ///     // Reads see the database as of transaction start.
+    ///     if tx.get(b"counter")?.is_none() {
+    ///         tx.put(b"counter", b"0");
+    ///     }
+    ///     tx.put(b"last_seen", b"alice");
+    ///     Ok::<_, Error>(())
+    /// })?;
+    ///
+    /// assert_eq!(db.get(b"counter")?.as_deref(), Some(b"0".as_slice()));
+    /// assert_eq!(db.get(b"last_seen")?.as_deref(), Some(b"alice".as_slice()));
+    /// # Ok::<_, Box<dyn std::error::Error>>(())
+    /// ```
     #[instrument(level = "info", skip_all)]
     pub fn transaction<F, R>(&self, f: F) -> Result<R>
     where

@@ -58,6 +58,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   per Pages convention (the latest commit wins). Requires
   "Source: GitHub Actions" in the repository's Pages settings
   before the first deploy.
+- Compile-checked doctests on the three highest-traffic public
+  items: the `Lattice` struct (overview example with a cloned
+  handle reading from a spawned thread), `Lattice::open` (open,
+  put, drop, reopen, get round-trip proves WAL replay), and
+  `Lattice::transaction` (closure shape, conditional put, atomic
+  commit). Each doctest uses `tempfile::tempdir` (a dev-dep
+  available in doctests) so it never touches a real database
+  path. `cargo test --doc` runs them on every CI build, so a
+  drift between docs and API now blocks the PR instead of
+  rotting silently.
 - Fuzzing scaffold under `crates/lattice-core/fuzz/`. Three
   `cargo-fuzz` targets (`wal_open`, `sstable_open`,
   `manifest_open`) write arbitrary bytes into a tempdir and
