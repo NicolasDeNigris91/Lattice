@@ -46,6 +46,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   reopen-roundtrip property they form the project's
   three-pillar correctness fence: replay-on-reopen, snapshot
   isolation, and compaction equivalence.
+- `.github/workflows/book.yml` deploys the mdBook to GitHub
+  Pages on every push that touches `book/**`. Acts as a free
+  redundant mirror of the Railway-hosted book at
+  `lattice.nicolaspilegidenigris.dev`. Concurrency is gated
+  per Pages convention (the latest commit wins). Requires
+  "Source: GitHub Actions" in the repository's Pages settings
+  before the first deploy.
 - Cross-platform binary release artifacts. The `release.yml`
   workflow now builds the `lattice` CLI for x86_64 / aarch64
   Linux, x86_64 / aarch64 macOS, and x86_64 Windows on every
