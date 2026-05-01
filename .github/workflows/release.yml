@@ -60,3 +60,83 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+
+  cli-binaries:
+    name: cli binary (${{ matrix.target }})
+    needs: github-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # Linux aarch64 needs a cross compiler. The other targets
+      # build natively on their respective runners.
+      - name: Install aarch64 linker
+        if: ${{ matrix.target == 'aarch64-unknown-linux-gnu' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          echo "[target.aarch64-unknown-linux-gnu]" >> .cargo/config.toml
+          echo "linker = \"aarch64-linux-gnu-gcc\"" >> .cargo/config.toml
+
+      - name: Build release binary
+        run: cargo build --release --bin lattice -p lattice-cli --target ${{ matrix.target }}
+
+      - name: Package archive
+        shell: bash
+        run: |
+          set -eu
+          STAGE="lattice-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir "$STAGE"
+          cp README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md "$STAGE/"
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            cp "target/${{ matrix.target }}/release/lattice.exe" "$STAGE/"
+            ASSET="${STAGE}.zip"
+            7z a "$ASSET" "$STAGE" >/dev/null
+          else
+            cp "target/${{ matrix.target }}/release/lattice" "$STAGE/"
+            ASSET="${STAGE}.tar.gz"
+            tar -czf "$ASSET" "$STAGE"
+          fi
+          # Generate a SHA-256 checksum for verification.
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            shasum -a 256 "$ASSET" > "${ASSET}.sha256"
+          elif [[ "$RUNNER_OS" == "Linux" ]]; then
+            sha256sum "$ASSET" > "${ASSET}.sha256"
+          else
+            certutil -hashfile "$ASSET" SHA256 | grep -v ":" | head -n 1 > "${ASSET}.sha256"
+          fi
+          echo "ASSET=$ASSET" >> "$GITHUB_ENV"
+          echo "ASSET_SHA=${ASSET}.sha256" >> "$GITHUB_ENV"
+
+      - name: Upload to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET_SHA }}

@@ -35,6 +35,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   mirrors the CI bar so contributors can pre-flight before
   pushing.
 - `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1).
+- Cross-platform binary release artifacts. The `release.yml`
+  workflow now builds the `lattice` CLI for x86_64 / aarch64
+  Linux, x86_64 / aarch64 macOS, and x86_64 Windows on every
+  tag. Each archive ships the binary plus README, dual-licence
+  files, and CHANGELOG, alongside a SHA-256 checksum file for
+  verification. Users without a Rust toolchain can grab a
+  binary from the GitHub release page instead of running
+  `cargo install`.
 
 ### Changed
 - `Cargo.toml` polish for crates.io publishing: workspace gains
