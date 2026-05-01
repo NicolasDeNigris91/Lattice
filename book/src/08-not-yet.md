@@ -77,7 +77,9 @@ blocking pool. The honest version replaces parking_lot with
 `tokio::sync` and `std::fs` with `tokio::fs`, removes the
 `spawn_blocking` per call, and flips `sync_data` into a
 selectively-scoped blocking call. The lock discipline rewrite
-is the hard part; tracked as a v2.x candidate.
+is the hard part; tracked as a v2.x candidate. A related but
+narrower deferral, non-blocking compaction (`compact_async`),
+has a design sketch in chapter 15.
 
 ### MVCC
 
@@ -113,8 +115,9 @@ The WAL and SSTable formats both compose cleanly with an
 encryption layer in front. The choices (authenticated
 encryption with what associated data, key rotation, replay
 tolerance under decryption failure) are interesting in their
-own right and would distract from the storage path. No
-release tracked yet.
+own right and would distract from the storage path. A design
+sketch (XChaCha20-Poly1305, deterministic per-block nonces,
+on-disk format version bump) lives in chapter 15.
 
 ### Fuzzing
 

@@ -36,3 +36,4 @@
 # Beyond v1.0
 
 - [What is not yet implemented](08-not-yet.md)
+- [Design notes for v2.x](15-design-notes.md)
