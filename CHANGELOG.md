@@ -8,26 +8,6 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- Loom model-checking suite. New `lattice-loom-tests` workspace
-  member that drives the conflict-detection state machine under
-  every legal interleaving of two and three threads. Two
-  invariants are pinned: the `(write_seq` bump, `last_writes`
-  insert) pair recorded by `record_write` is observed atomically
-  by any later reader, and a concurrent trim never drops an
-  entry an in-flight transaction still needs. Loom is opt-in;
-  default `cargo test` skips it. Run the suite with
-  `RUSTFLAGS="--cfg loom" cargo test -p lattice-loom-tests --release`.
-  Closes the v1.6 (conflict detection) and v1.10 (last-writes
-  trim) reasoning gap that was previously hand-checked.
-- `crates/lattice-core/src/conflict_tracker.rs` extracts the
-  `(write_seq`, `last_writes`, `active_tx`) trio behind a single
-  `ConflictTracker` API. `Inner` now holds one `tracker` field
-  and delegates every bump, lookup, and trim through it. The
-  module uses `std::sync::Mutex` rather than `parking_lot` so
-  loom can shadow the primitives under `--cfg loom`; the lock is
-  held only across a single `BTreeMap` operation, so the
-  difference vs. `parking_lot` is below the noise floor of the
-  surrounding I/O.
 - `deny.toml` at the workspace root, plus a `cargo deny check`
   job in CI. Audits advisories, licences (explicit allow list),
   duplicate dependencies (warn), wildcard versions (deny), and
@@ -169,6 +149,52 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ### Notes
 - No version bump. Pure infrastructure; the next feature
   release rolls these in.
+
+## [1.11.0] - 2026-05-01
+
+Adds loom model checking for the conflict-detection state
+machine. Standard concurrency tests sample one of many possible
+thread schedules per run; loom exercises every legal interleaving
+and proves the soundness invariants reasoned about by hand in
+v1.6 (per-key `last_writes`) and v1.10 (snapshot-aware trim) hold
+under all of them. The release also extracts the cooperating
+state behind a single `ConflictTracker` API; behaviour is
+unchanged and all 80 existing tests pass against the refactor.
+
+### Added
+- Loom model-checking suite. New `lattice-loom-tests` workspace
+  member that drives the conflict-detection state machine under
+  every legal interleaving of two and three threads. Two
+  invariants are pinned: the (`write_seq` bump, `last_writes`
+  insert) pair recorded by `record_write` is observed atomically
+  by any later reader, and a concurrent trim never drops an
+  entry an in-flight transaction still needs. Loom is opt-in;
+  default `cargo test` skips it. Run the suite with
+  `RUSTFLAGS="--cfg loom" cargo test -p lattice-loom-tests --release`.
+  CI runs it on Linux on every push. Closes the v1.6 (conflict
+  detection) and v1.10 (last-writes trim) reasoning gap that was
+  previously hand-checked.
+- `crates/lattice-core/src/conflict_tracker.rs` extracts the
+  (`write_seq`, `last_writes`, `active_tx`) trio behind a single
+  `ConflictTracker` API. `Inner` now holds one `tracker` field
+  and delegates every bump, lookup, and trim through it. The
+  module uses `std::sync::Mutex` rather than `parking_lot` so
+  loom can shadow the primitives under `--cfg loom`; the lock is
+  held only across a single `BTreeMap` operation, so the
+  difference vs. `parking_lot` is below the noise floor of the
+  surrounding I/O.
+
+### Changed
+- Book chapter 9 ("Concurrency") gains a "Loom model checking"
+  section that explains the suite's scope, the two invariants it
+  pins, and the `RUSTFLAGS="--cfg loom"` invocation.
+- Book chapter 8 ("What is not yet implemented") moves "Loom
+  model checking" from the open list into "Closed in earlier
+  releases" with a v1.11 attribution.
+- `ConflictTracker::check_conflict` takes an iterator of
+  `&[u8]` rather than a slice of `Vec<u8>`, so the transaction
+  commit path no longer allocates an intermediate `Vec` per call
+  to chain its read and write sets.
 
 ## [1.10.0] - 2026-04-30
 
