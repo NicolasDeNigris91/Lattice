@@ -8,38 +8,6 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- `Lattice::scan_iter(prefix) -> ScanIter`. Streaming variant of
-  `scan` that yields visible `(key, value)` pairs in strictly
-  increasing key order via a `BinaryHeap` k-way merge over the
-  active memtable, the frozen memtable, and every `SSTable`
-  newest-first. Tombstones are filtered after the dedupe so a
-  deletion in a newer tier hides an older live value, matching
-  `get`. Memory is independent of the total number of keys:
-  `O(num_sources)` for the heap frontier plus one decoded block
-  per `SSTable` source (default 4 KiB) plus the memtable
-  snapshots. `ScanIter` implements
-  `Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>` and is `Send`,
-  so callers can move it across threads. `Lattice::scan` keeps
-  its old signature and now delegates to
-  `scan_iter().collect()`. Documented in book chapter 16
-  ("Streaming scan iterator"). `tests/scan_iter.rs` adds 5
-  contract tests; `tests/property_durability.rs` adds
-  `scan_iter_matches_scan_under_random_history`, the fifth
-  pillar of the durability fence.
-- `.github/workflows/bench.yml` wires continuous benchmarking
-  through [bencher.dev](https://bencher.dev). Every push to
-  `main` and every pull request runs the criterion suite,
-  uploads the results to the `lattice` project, and runs
-  Welch's t-test against the rolling baseline at the configured
-  threshold. A regression alert fails the job and the bencher
-  GitHub App posts a per-PR comment naming the benchmark and
-  the magnitude of the slowdown. Statistical significance is
-  the gate, not raw delta, so noise on the shared GitHub runner
-  does not produce false positives. The job is gated on
-  `BENCHER_API_TOKEN`: forks and PRs from forks skip silently
-  with an informational notice rather than failing on a missing
-  secret. CONTRIBUTING.md gains a "Continuous benchmarking"
-  section that documents the workflow.
 - `deny.toml` at the workspace root, plus a `cargo deny check`
   job in CI. Audits advisories, licences (explicit allow list),
   duplicate dependencies (warn), wildcard versions (deny), and
@@ -181,6 +149,83 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ### Notes
 - No version bump. Pure infrastructure; the next feature
   release rolls these in.
+
+## [1.12.0] - 2026-05-01
+
+Adds streaming scan, continuous benchmarking, and a v2.x design
+notes chapter. `Lattice::scan_iter` exposes the same merge-and-
+dedupe logic as `scan` behind an `Iterator`, so callers walk the
+keyspace one entry at a time and the engine only holds the merge
+frontier plus one decoded block per `SSTable`. `scan` keeps its
+old signature and now delegates to `scan_iter().collect()`.
+Continuous benchmarking through bencher.dev runs the criterion
+suite on every push and PR and gates regressions through Welch's
+t-test against a rolling baseline. A new chapter 15 documents
+non-blocking compaction, the SkipMap memtable, and encryption at
+rest at design-doc depth so future review can start from a
+shared baseline.
+
+### Added
+- `Lattice::scan_iter(prefix) -> ScanIter`. Streaming variant of
+  `scan` that yields visible `(key, value)` pairs in strictly
+  increasing key order via a `BinaryHeap` k-way merge over the
+  active memtable, the frozen memtable, and every `SSTable`
+  newest-first. Tombstones are filtered after the dedupe so a
+  deletion in a newer tier hides an older live value, matching
+  `get`. Memory is independent of the total number of keys:
+  `O(num_sources)` for the heap frontier plus one decoded block
+  per `SSTable` source (default 4 KiB) plus the memtable
+  snapshots. `ScanIter` implements
+  `Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>` and is `Send`,
+  so callers can move it across threads. Documented in book
+  chapter 16 ("Streaming scan iterator").
+- `tests/scan_iter.rs` integration suite (5 tests) pinning the
+  contract: memtable-only equivalence, three-tier merge
+  resolution, prefix filter honoured, strictly-increasing key
+  order under inter-tier overlap, sstable-only tombstone hiding.
+- `tests/property_durability.rs` adds
+  `scan_iter_matches_scan_under_random_history`: 64 random op
+  histories per `cargo test`, each one asserts `scan_iter` and
+  `scan` yield the same `Vec` AND that the result matches the
+  `BTreeMap` reference's view of live keys. Fifth pillar of the
+  durability fence.
+- `.github/workflows/bench.yml` wires continuous benchmarking
+  through [bencher.dev](https://bencher.dev). Every push to
+  `main` and every pull request runs the criterion suite,
+  uploads the results to the `lattice` project, and runs
+  Welch's t-test against the rolling baseline at the configured
+  threshold. A regression alert fails the job and the bencher
+  GitHub App posts a per-PR comment naming the benchmark and
+  the magnitude of the slowdown. Statistical significance is
+  the gate, not raw delta, so noise on the shared GitHub runner
+  does not produce false positives. The job is gated on
+  `BENCHER_API_TOKEN`: forks and PRs from forks skip silently
+  with an informational notice rather than failing on a missing
+  secret. `CONTRIBUTING.md` gains a "Continuous benchmarking"
+  section that documents the workflow.
+- Book chapter 15 ("Design notes for v2.x") documents three
+  v2.x candidates at design-doc depth: non-blocking compaction
+  (`compact_async`), the SkipMap memtable, and encryption at
+  rest. Each section names the problem, the proposed shape,
+  the trade-off space, and the open questions. Chapter 8 gains
+  cross-references from the "Native async" and "Encryption at
+  rest" deferrals to the new chapter.
+
+### Changed
+- `Lattice::scan` now delegates to `scan_iter().collect()`. The
+  signature and behaviour are unchanged; existing callers do
+  not have to migrate.
+- `SSTableReader` gains `block_count` and `block_entries_at`
+  helpers so the new `SsTableSource` can walk blocks one at a
+  time through an `Arc<SSTableReader>` without holding any
+  borrows of the reader.
+- Book chapter 7 ("Benchmarks") fixes a stale claim that called
+  group commit a "Phase 5+" feature; group commit shipped in
+  v1.1 as `WriteOptions { durable: false }`.
+- Book chapter 11 ("Transactions") notes that v1.11 moved the
+  `(write_seq, last_writes, active_tx)` trio behind
+  `ConflictTracker` at `Inner::tracker`. The behaviour
+  described is unchanged.
 
 ## [1.11.0] - 2026-05-01
 
