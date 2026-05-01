@@ -23,8 +23,8 @@ walks the storage path end to end.
 * Examples: [`crates/lattice-core/examples/`](crates/lattice-core/examples) (basic kv, transactions, snapshots, streaming scan, background compaction)
 * Comparison: [Lattice vs sled vs fjall vs RocksDB](https://lattice.nicolaspilegidenigris.dev/17-comparison.html) — honest assessment of when to pick which
 * Production readiness: [chapter 18](https://lattice.nicolaspilegidenigris.dev/18-production-readiness.html) — what Lattice IS and IS NOT ready for
-* Roadmap: see the [CHANGELOG](CHANGELOG.md) and the
-  [book's "what is not yet" chapter](https://lattice.nicolaspilegidenigris.dev/08-not-yet.html).
+* Roadmap: see [ROADMAP.md](ROADMAP.md), the [CHANGELOG](CHANGELOG.md), and
+  the [book's "what is not yet" chapter](https://lattice.nicolaspilegidenigris.dev/08-not-yet.html).
 
 ## Features
 

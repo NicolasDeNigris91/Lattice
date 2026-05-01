@@ -336,6 +336,49 @@ proptest! {
         }
     }
 
+    /// `scan_range` (v1.16) yields the same set of pairs as a
+    /// post-filtered `scan`, in the same order. The test drives a
+    /// random op history, picks two random keys from the touched
+    /// alphabet for the bounds (inclusive-exclusive), and asserts
+    /// the two APIs converge. This pins `scan_range` as a
+    /// behavioural drop-in for callers that previously
+    /// post-filtered a `scan` result.
+    #[test]
+    fn scan_range_matches_post_filtered_scan_under_random_history(
+        ops in proptest::collection::vec(arb_op(), 0..150),
+        lo in any::<u8>(),
+        hi in any::<u8>(),
+    ) {
+        let dir = tempdir().unwrap();
+        let db = Lattice::open(dir.path()).unwrap();
+
+        let mut reference: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        let mut all_keys: BTreeSet<Vec<u8>> = BTreeSet::new();
+        replay(&db, &ops, &mut reference, &mut all_keys);
+
+        // Map random bytes onto the test's tiny key alphabet for
+        // bounds: each lo/hi byte picks one of {a, b, c, d, e, f, g, h, i, j}.
+        let alphabet: Vec<&[u8]> = vec![
+            b"a", b"b", b"c", b"d", b"e", b"f", b"g", b"h", b"i", b"j",
+        ];
+        let start = alphabet[lo as usize % alphabet.len()];
+        let end = alphabet[hi as usize % alphabet.len()];
+
+        let from_range: Vec<(Vec<u8>, Vec<u8>)> = db
+            .scan_range(Some(start), Some(end))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        let from_filtered: Vec<(Vec<u8>, Vec<u8>)> = db
+            .scan(None)
+            .unwrap()
+            .into_iter()
+            .filter(|(k, _)| k.as_slice() >= start && k.as_slice() < end)
+            .collect();
+
+        prop_assert_eq!(from_range, from_filtered);
+    }
+
     /// `scan_iter` is the streaming variant of `scan`. The two must
     /// be observationally equivalent under any history of puts,
     /// deletes, flushes, and compactions: same set of visible
