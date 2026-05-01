@@ -123,6 +123,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   and `categories` (the workspace defaults are library-shaped).
 - `CONTRIBUTING.md` adds the `cargo deny` and coverage rows to
   the project bar and points to the new code of conduct.
+- Book chapter 9 ("Concurrency") fixes a forward-looking
+  claim that aged poorly. The chapter said background
+  compaction was deferred to v1.3; v1.3 actually brought
+  leveled compaction (a better algorithm) but kept the work
+  on the caller's thread, so the deferral is now correctly
+  attributed to a v2.x milestone.
 - `README.md` is restructured for first-impression density: a
   Features section near the top, three "at a glance" examples
   (sync, transactional, async), and a "Where Lattice fits"

@@ -113,9 +113,12 @@ runs the merge I/O outside any state lock, then takes
 reads keep firing throughout the merge.
 
 In v1.2 the caller still pays the wall-clock cost of compaction
-(`compact()` is blocking). Moving compaction onto a background
-thread is M2.4 work, deferred to v1.3 because the call site is
-rare in practice and the lock-discipline change is large.
+(`compact()` is blocking). v1.3 brought leveled compaction (a
+better algorithm, but kept on the caller's thread); moving the
+work itself onto a background thread is a v2.x candidate
+because the lock-discipline change is large and the call site
+is rare enough in practice that the wall-clock cost has not
+been the binding constraint.
 
 ## The background flusher
 
