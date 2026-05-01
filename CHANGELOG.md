@@ -150,6 +150,40 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - No version bump. Pure infrastructure; the next feature
   release rolls these in.
 
+## [1.15.0] - 2026-05-01
+
+Operational introspection. `Lattice::stats()` returns an owned
+`Stats` value with the gauge-shaped counters (memtable bytes,
+per-level SSTable counts, next sequence number, pending
+non-durable WAL records) that complement the histogram-shaped
+metrics facade. The call is one `RwLock` read plus a few
+atomic loads; safe to poll on a sub-second tick from a
+metrics exporter that does not want a `metrics` recorder
+dependency. CITATION.cff at the repo root signals to academic
+and professional users that the project can be cited; GitHub
+auto-renders the file into the "Cite this repository" UI.
+
+### Added
+- `Lattice::stats() -> Stats`. Returns an owned point-in-time
+  snapshot of the engine's operational state: `memtable_bytes`,
+  `frozen_memtable_bytes`, `level_sstables: Vec<usize>`,
+  `next_seq`, `pending_writes`. `Stats::total_sstables` and
+  `Stats::level_count` are convenience helpers. `Stats` derives
+  `Debug`, `Clone`, `PartialEq`, `Eq` so it round-trips through
+  metrics pipelines and tests can assert on it directly.
+  Documented in book chapter 14 ("Operational snapshot via
+  stats()").
+- `tests/stats.rs` contract suite (5 tests): empty-database
+  baseline, write-then-flush accumulator, post-compact
+  at-most-one-per-level invariant, value-snapshot semantics
+  (subsequent ops do not mutate a previously returned `Stats`),
+  Debug+Clone round-trip.
+- `CITATION.cff` at the repo root following the
+  [citation-file-format](https://citation-file-format.github.io/)
+  1.2.0 spec. GitHub renders it into the project page's "Cite
+  this repository" widget; academic and professional users get
+  a canonical citation entry instead of having to make one up.
+
 ## [1.14.0] - 2026-05-01
 
 API ergonomics. The public read/write surface (`put`, `put_with`,
