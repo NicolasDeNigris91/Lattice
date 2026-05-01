@@ -37,3 +37,5 @@
 
 - [What is not yet implemented](08-not-yet.md)
 - [Design notes for v2.x](15-design-notes.md)
+- [Lattice vs the alternatives](17-comparison.md)
+- [Production readiness](18-production-readiness.md)

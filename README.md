@@ -12,7 +12,7 @@ Lattice is built for learning and portfolio purposes. It
 implements the fundamental components of modern log-structured
 merge-tree databases without depending on any existing storage
 library, and the [companion book](https://lattice.nicolaspilegidenigris.dev)
-documents every design decision in plain language. Eleven
+documents every design decision in plain language. Thirteen
 public releases on [`main`](https://github.com/NicolasDeNigris91/Lattice/commits/main),
 strict CI on Linux, macOS, and Windows, and an mdBook that
 walks the storage path end to end.
@@ -20,6 +20,9 @@ walks the storage path end to end.
 * Crate: [`lattice-core`](crates/lattice-core)
 * CLI: [`lattice-cli`](crates/lattice-cli)
 * Book: <https://lattice.nicolaspilegidenigris.dev>
+* Examples: [`crates/lattice-core/examples/`](crates/lattice-core/examples) (basic kv, transactions, snapshots, streaming scan, background compaction)
+* Comparison: [Lattice vs sled vs fjall vs RocksDB](https://lattice.nicolaspilegidenigris.dev/17-comparison.html) — honest assessment of when to pick which
+* Production readiness: [chapter 18](https://lattice.nicolaspilegidenigris.dev/18-production-readiness.html) — what Lattice IS and IS NOT ready for
 * Roadmap: see the [CHANGELOG](CHANGELOG.md) and the
   [book's "what is not yet" chapter](https://lattice.nicolaspilegidenigris.dev/08-not-yet.html).
 
