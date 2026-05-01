@@ -111,3 +111,31 @@ that a dashboard needs to spot a flush stall, a compaction
 cascade, or a transaction-conflict storm.
 
 [`metrics`]: https://docs.rs/metrics
+
+## Operational snapshot via `stats()`
+
+The `metrics` facade is the right hook for a Prometheus-style
+exporter. For dashboards, debugging sessions, and tests that
+need to assert on engine state without spinning up a recorder,
+v1.15 adds [`Lattice::stats`], which returns an owned `Stats`
+value with the operational counters that do not need
+aggregation:
+
+- `memtable_bytes` and `frozen_memtable_bytes` for
+  flush-trigger introspection.
+- `level_sstables: Vec<usize>` for the per-level layout.
+- `next_seq` for the sequence counter the next flush or
+  compaction will use.
+- `pending_writes` for the buffered non-durable WAL records.
+
+`Stats::total_sstables` and `Stats::level_count` are convenience
+helpers on top. The whole call is one `RwLock` read and a
+handful of atomic loads; safe to poll on a sub-second tick
+from a metrics exporter that does not want a `metrics`
+recorder dependency.
+
+`stats()` and the `metrics` facade are independent. A
+deployment can use both: the exporter wires the recorder for
+counters and histograms; the same process polls `stats()`
+periodically to snapshot the gauge-like state the recorder
+does not see. See `tests/stats.rs` for the contract.

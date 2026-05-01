@@ -1,0 +1,37 @@
+# See https://citation-file-format.github.io/ for the spec.
+cff-version: 1.2.0
+message: "If you use Lattice in academic or professional work, please cite it."
+type: software
+title: "Lattice: an embeddable LSM-tree key-value storage engine in Rust"
+abstract: >-
+  Lattice is a single-process, ordered byte-key byte-value store
+  built from scratch in safe Rust. It implements the fundamental
+  components of modern log-structured merge-tree databases (write
+  ahead log, memtable, sorted string tables with sparse index,
+  bloom filters, tiered leveled compaction, snapshots,
+  snapshot-isolated transactions with per-key conflict
+  detection) without depending on any existing storage library.
+  The engine is forbid(unsafe_code), tested with property-based,
+  fuzz, and loom model checking, and documented end-to-end in a
+  companion mdBook.
+authors:
+  - family-names: "Pilegi De Nigris"
+    given-names: "Nicolas"
+    email: "nicolas.denigris91@icloud.com"
+    orcid: ""
+repository-code: "https://github.com/NicolasDeNigris91/Lattice"
+url: "https://lattice.nicolaspilegidenigris.dev"
+license:
+  - "MIT"
+  - "Apache-2.0"
+keywords:
+  - "lsm-tree"
+  - "key-value-store"
+  - "rust"
+  - "embedded-database"
+  - "storage-engine"
+  - "snapshot-isolation"
+  - "loom"
+  - "property-testing"
+version: "1.14.0"
+date-released: "2026-05-01"

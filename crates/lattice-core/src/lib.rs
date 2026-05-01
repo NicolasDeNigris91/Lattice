@@ -167,6 +167,51 @@ use crate::wal::{LogEntry, Wal};
 // and trim through that module so the loom suite under
 // `lattice-loom-tests` exercises the same code path as production.
 
+/// Operational snapshot of an open [`Lattice`] handle, returned
+/// by [`Lattice::stats`]. All fields are owned and sized for a
+/// metrics scrape; reading the snapshot does not affect the
+/// engine.
+///
+/// The values are point-in-time and may change between calls.
+/// Callers wiring this into a metrics exporter should treat the
+/// numbers as the most recent observation, not a live counter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stats {
+    /// Approximate byte footprint of the active memtable. Sized
+    /// against [`LatticeBuilder::flush_threshold_bytes`]; a flush
+    /// fires once this crosses the threshold.
+    pub memtable_bytes: usize,
+    /// Approximate byte footprint of the frozen memtable
+    /// (mid-flush). Zero when no flush is in progress.
+    pub frozen_memtable_bytes: usize,
+    /// Per-level `SSTable` counts. Index is the level number;
+    /// element is the number of tables in that level. Empty
+    /// trailing levels are omitted.
+    pub level_sstables: Vec<usize>,
+    /// Next `SSTable` sequence number the engine will assign on
+    /// its next flush or compaction. Monotonic across the
+    /// lifetime of the database directory.
+    pub next_seq: u64,
+    /// Non-durable WAL records buffered since the last
+    /// `fsync`. Bounded by `LatticeBuilder::commit_batch`.
+    pub pending_writes: usize,
+}
+
+impl Stats {
+    /// Total `SSTable` count across every level. Sums
+    /// [`Self::level_sstables`].
+    #[must_use]
+    pub fn total_sstables(&self) -> usize {
+        self.level_sstables.iter().sum()
+    }
+
+    /// Number of non-empty levels.
+    #[must_use]
+    pub fn level_count(&self) -> usize {
+        self.level_sstables.iter().filter(|&&n| n > 0).count()
+    }
+}
+
 /// Per-write knobs. Today this is only `durable`; future options
 /// (e.g. write priority) will land here without breaking callers.
 #[derive(Debug, Clone, Copy)]
@@ -1168,6 +1213,45 @@ impl Lattice {
     /// Path to the database directory.
     pub fn path(&self) -> &Path {
         &self.inner.path
+    }
+
+    /// Snapshot of operational counters, sized for dashboards
+    /// and ops introspection. Cheap to call (one read lock on
+    /// the LSM state, plus a handful of atomic loads); a single
+    /// caller can poll it on a sub-second tick without
+    /// measurably loading the engine.
+    ///
+    /// The returned [`Stats`] is a value snapshot, not a live
+    /// view; subsequent operations through any handle do not
+    /// change a previously returned `Stats`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use lattice_core::Lattice;
+    /// let dir = tempfile::tempdir()?;
+    /// let db = Lattice::open(dir.path())?;
+    /// db.put(b"k", b"v")?;
+    /// let stats = db.stats();
+    /// assert!(stats.memtable_bytes > 0);
+    /// assert_eq!(stats.frozen_memtable_bytes, 0);
+    /// assert_eq!(stats.total_sstables(), 0);
+    /// # Ok::<_, Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn stats(&self) -> Stats {
+        let memtable_bytes = self.inner.active.read().approx_size();
+        let state = self.inner.state.read().clone();
+        let frozen_memtable_bytes = state.frozen.as_ref().map_or(0, |m| m.approx_size());
+        let level_sstables: Vec<usize> = state.levels.iter().map(Vec::len).collect();
+        let next_seq = state.next_seq;
+        let pending_writes = self.inner.pending_writes.load(Ordering::Acquire);
+        Stats {
+            memtable_bytes,
+            frozen_memtable_bytes,
+            level_sstables,
+            next_seq,
+            pending_writes,
+        }
     }
 
     /// Run a closure inside a snapshot-isolated transaction. Reads
