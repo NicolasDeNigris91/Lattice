@@ -13,6 +13,15 @@
 mod async_api;
 mod bloom;
 mod compaction;
+// `conflict_tracker` is internal to the engine, but the `loom` test
+// crate needs cross-crate access to drive its model checks. The
+// `cfg(loom)` build flips the visibility to `pub`; default builds
+// keep the symbol crate-private so `cargo public-api` does not
+// register it as part of the public surface.
+#[cfg(loom)]
+pub mod conflict_tracker;
+#[cfg(not(loom))]
+pub(crate) mod conflict_tracker;
 mod error;
 mod manifest;
 mod memtable;
@@ -29,7 +38,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -37,6 +46,7 @@ use std::time::{Duration, Instant};
 use parking_lot::{Mutex, RwLock};
 use tracing::{info, instrument, warn};
 
+use crate::conflict_tracker::ConflictTracker;
 pub use crate::error::{Error, Result};
 use crate::manifest::Manifest;
 use crate::memtable::{Lookup, MemTable};
@@ -45,11 +55,11 @@ use crate::sstable::{SSTableReader, SSTableWriter, SsLookup};
 pub use crate::transaction::Transaction;
 use crate::wal::{LogEntry, Wal};
 
-/// Number of `last_writes` entries that triggers a trim pass after
-/// the next put / delete / transaction commit. The trim runs in
-/// O(n) over the map, so a fixed threshold keeps amortised cost
-/// per write at O(1) regardless of total dataset size.
-const LAST_WRITES_TRIM_THRESHOLD: usize = 1024;
+// The conflict-detection state (`write_seq`, `last_writes`,
+// `active_tx`) and its trim threshold live behind
+// [`ConflictTracker`]. The engine delegates every bump, lookup,
+// and trim through that module so the loom suite under
+// `lattice-loom-tests` exercises the same code path as production.
 
 /// Per-write knobs. Today this is only `durable`; future options
 /// (e.g. write priority) will land here without breaking callers.
@@ -200,29 +210,13 @@ struct Inner {
     wal: Mutex<Wal>,
     /// Pending non-durable WAL records since the last sync.
     pending_writes: AtomicUsize,
-    /// Monotonic per-write sequence used by transaction conflict
-    /// detection. Bumped under the WAL mutex on every successful
-    /// put or delete so it stays in lock-step with `last_writes`.
-    write_seq: AtomicU64,
-    /// Last `write_seq` at which each key was modified. Updated
-    /// under the WAL mutex on every successful put or delete.
-    /// Read by transaction commit to decide whether the
-    /// transaction's snapshot is still consistent. Trimmed when
-    /// `len() > LAST_WRITES_TRIM_THRESHOLD`; entries with `seq`
-    /// not greater than the oldest active transaction's
-    /// `snapshot_seq` (or `write_seq` when no transaction is
-    /// active) are dropped, since they cannot trigger a conflict
-    /// for any present-or-future transaction.
-    last_writes: RwLock<BTreeMap<Vec<u8>, u64>>,
-    /// Multiset of `snapshot_seq` values currently held by
-    /// in-flight transactions. The smallest key is the trim
-    /// cutoff: any entry in `last_writes` with `seq` not greater
-    /// than this minimum cannot trigger a conflict for an
-    /// in-flight transaction (the conflict check fires only when
-    /// `entry.seq > tx.snapshot_seq`). Updated under its own
-    /// mutex, never simultaneously with the WAL mutex, so the two
-    /// locks have no ordering relationship.
-    active_tx: Mutex<BTreeMap<u64, usize>>,
+    /// Snapshot-isolation conflict tracker. Owns the monotonic
+    /// `write_seq` counter, the `key -> last seq` map, and the
+    /// in-flight `snapshot_seq` multiset. The engine delegates
+    /// every bump, conflict check, and trim through the tracker
+    /// so the loom model checks under `lattice-loom-tests`
+    /// exercise the same code path as production.
+    tracker: ConflictTracker,
     /// Serialises flush and compact so two concurrent puts cannot
     /// race on `next_seq` or on the manifest write.
     mutation_lock: Mutex<()>,
@@ -461,9 +455,7 @@ impl Lattice {
             state: RwLock::new(state),
             wal: Mutex::new(wal),
             pending_writes: AtomicUsize::new(0),
-            write_seq: AtomicU64::new(0),
-            last_writes: RwLock::new(BTreeMap::new()),
-            active_tx: Mutex::new(BTreeMap::new()),
+            tracker: ConflictTracker::new(),
             mutation_lock: Mutex::new(()),
             flush_threshold_bytes,
             compaction_threshold,
@@ -585,17 +577,14 @@ impl Lattice {
         }
 
         // Track the per-key write sequence used by transaction
-        // conflict detection. The bump and the BTreeMap insert run
-        // under the WAL mutex held by the caller, so the pair is
-        // consistent for any other writer that takes the same lock.
-        let new_seq = self.inner.write_seq.fetch_add(1, Ordering::AcqRel) + 1;
+        // conflict detection. `record_write` bumps `write_seq` and
+        // inserts into `last_writes` under a single tracker-internal
+        // lock, so the pair is observed atomically by any reader
+        // (including a concurrent transaction commit's check).
         let key_for_tracking = match entry {
             LogEntry::Put { key, .. } | LogEntry::Delete { key } => key.clone(),
         };
-        self.inner
-            .last_writes
-            .write()
-            .insert(key_for_tracking, new_seq);
+        self.inner.tracker.record_write(key_for_tracking);
 
         // Apply to the memtable.
         let needs_flush = {
@@ -991,17 +980,23 @@ impl Lattice {
         let needs_flush = {
             let mut wal = self.inner.wal.lock();
 
-            // Conflict check.
+            // Conflict check. The tracker walks every key in the
+            // transaction's read and write sets in one pass,
+            // returning early when one has a `last_seq >
+            // snapshot_seq`. The borrow chain avoids an
+            // intermediate `Vec` allocation per commit.
+            let conflict_keys = tx
+                .read_set
+                .iter()
+                .chain(tx.write_set.keys())
+                .map(Vec::as_slice);
+            if self
+                .inner
+                .tracker
+                .check_conflict(tx.snapshot_seq, conflict_keys)
             {
-                let last_writes = self.inner.last_writes.read();
-                for key in tx.read_set.iter().chain(tx.write_set.keys()) {
-                    if let Some(&last_seq) = last_writes.get(key)
-                        && last_seq > tx.snapshot_seq
-                    {
-                        metrics_compat::record_transaction_conflict();
-                        return Err(Error::TransactionConflict);
-                    }
-                }
+                metrics_compat::record_transaction_conflict();
+                return Err(Error::TransactionConflict);
             }
 
             // Apply phase.
@@ -1067,72 +1062,40 @@ impl Lattice {
         manifest.save(&self.inner.path)
     }
 
-    /// Register a new in-flight transaction by capturing its
-    /// `snapshot_seq` and incrementing the `active_tx` multiset
-    /// under a single lock. The returned guard decrements on drop.
-    /// This must run before [`Self::snapshot`]'s value is read by
-    /// the transaction so that any concurrent trim observes this
-    /// transaction's `snapshot_seq` and refrains from dropping
-    /// entries that the transaction's commit might still need.
+    /// Register a new in-flight transaction by delegating to the
+    /// conflict tracker. The tracker captures the current
+    /// `write_seq` as the transaction's `snapshot_seq` and bumps
+    /// the active multiset entry under a single lock; the returned
+    /// guard decrements on drop. Must run before the transaction's
+    /// snapshot is taken so any concurrent trim observes this
+    /// registration and preserves entries the commit might need.
     fn register_active_tx(&self) -> ActiveTxGuard<'_> {
-        let snapshot_seq = {
-            let mut active = self.inner.active_tx.lock();
-            let seq = self.inner.write_seq.load(Ordering::Acquire);
-            *active.entry(seq).or_insert(0) += 1;
-            seq
-        };
+        let snapshot_seq = self.inner.tracker.begin_tx();
         ActiveTxGuard {
-            inner: &self.inner,
+            tracker: &self.inner.tracker,
             snapshot_seq,
         }
     }
 
-    /// Drop entries from `last_writes` whose `seq` cannot trigger a
-    /// conflict for any in-flight or future transaction. A no-op
-    /// when the map is below the trim threshold.
-    ///
-    /// Cutoff = the smallest `snapshot_seq` of any in-flight
-    /// transaction, or the current `write_seq` when no transaction
-    /// is in flight. The retain keeps entries with `seq > cutoff`,
-    /// because the conflict check fires when `entry.seq >
-    /// tx.snapshot_seq` and any retained entry must therefore be
-    /// preserved for at least the oldest transaction.
+    /// Delegates to the tracker's `maybe_trim`. See
+    /// [`ConflictTracker::maybe_trim`] for the cutoff rule.
     fn maybe_trim_last_writes(&self) {
-        if self.inner.last_writes.read().len() <= LAST_WRITES_TRIM_THRESHOLD {
-            return;
-        }
-        let cutoff = {
-            let active = self.inner.active_tx.lock();
-            active
-                .keys()
-                .next()
-                .copied()
-                .unwrap_or_else(|| self.inner.write_seq.load(Ordering::Acquire))
-        };
-        let mut last_writes = self.inner.last_writes.write();
-        last_writes.retain(|_, seq| *seq > cutoff);
+        self.inner.tracker.maybe_trim();
     }
 }
 
-/// Drops a transaction's `snapshot_seq` from the `active_tx`
-/// multiset on scope exit, including panic unwinding. The bare
-/// integer field plus reference is a deliberate choice over a
-/// callback closure: the engine is `Send + Sync` and a closure
-/// would force a heavier bound on the guard.
+/// Drops a transaction's `snapshot_seq` from the tracker's active
+/// multiset on scope exit, including panic unwinding. Holding a
+/// borrow of the tracker (rather than a callback closure) keeps the
+/// guard `Send + Sync` and zero-allocation.
 struct ActiveTxGuard<'a> {
-    inner: &'a Inner,
+    tracker: &'a ConflictTracker,
     snapshot_seq: u64,
 }
 
 impl Drop for ActiveTxGuard<'_> {
     fn drop(&mut self) {
-        let mut active = self.inner.active_tx.lock();
-        if let Some(count) = active.get_mut(&self.snapshot_seq) {
-            *count -= 1;
-            if *count == 0 {
-                active.remove(&self.snapshot_seq);
-            }
-        }
+        self.tracker.end_tx(self.snapshot_seq);
     }
 }
 
@@ -1220,7 +1183,8 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use super::{Error, LAST_WRITES_TRIM_THRESHOLD, Lattice};
+    use super::{Error, Lattice};
+    use crate::conflict_tracker::LAST_WRITES_TRIM_THRESHOLD;
     use tempfile::tempdir;
 
     #[test]
@@ -1246,7 +1210,7 @@ mod tests {
             db.put(key.as_bytes(), b"v").unwrap();
         }
 
-        let len = db.inner.last_writes.read().len();
+        let len = db.inner.tracker.last_writes_len();
         assert!(
             len <= LAST_WRITES_TRIM_THRESHOLD,
             "last_writes must be bounded by the trim threshold; got {len}, expected <= {LAST_WRITES_TRIM_THRESHOLD}",

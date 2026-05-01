@@ -58,6 +58,16 @@ bincode = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing-test = { workspace = true }
 
+# Loom replaces `std::sync` and `std::sync::atomic` with checked
+# variants and runs the conflict tracker under every legal
+# interleaving of the spawned threads. Pulled in only when
+# `--cfg loom` is set so default builds skip the dependency tree
+# entirely. Loom tests live in the `lattice-loom-tests` crate so
+# they are compiled in isolation, away from `tokio` (which itself
+# does not build under `--cfg loom`).
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
 [[bench]]
 name = "put_get"
 harness = false

@@ -50,6 +50,13 @@ The following were deferred at v1.0 and ship today:
   Shipped in **v1.10**: `last_writes` trims based on the
   smallest in-flight transaction's `snapshot_seq`. Chapter 11
   covers the trim policy and the soundness invariant.
+- **Loom model checking.** Deferred at v1.10 because it
+  required extracting the conflict-detection state into a
+  module that could be driven under `loom::sync`. Shipped in
+  **v1.11**: `crates/lattice-loom-tests` exercises the
+  `(write_seq` bump, `last_writes` insert) atomicity and the
+  trim-safety invariant under every legal interleaving of
+  two and three threads. Chapter 9 covers the suite.
 
 ## Still open
 
@@ -118,18 +125,6 @@ read path against malformed input. The targets are obvious
 candidate; the implementation needs nightly toolchain plus
 `cargo install cargo-fuzz`, both outside the project's
 default contributor setup.
-
-### Loom model checking
-
-The concurrent code in v1.6 (transaction conflict detection
-under the WAL mutex) and v1.10 (`active_tx` plus `last_writes`
-trim) was reasoned about by hand. `loom` would exhaustively
-explore the interleavings on the critical paths
-(`apply_entry_locked` and `transaction` commit) and prove the
-absence of certain races. Adding loom requires a sync
-abstraction trait (parking_lot in normal builds, `loom::sync`
-under `cfg(loom)`) which is invasive. Tracked as a future
-candidate.
 
 ### A real benchmark suite
 

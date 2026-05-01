@@ -8,6 +8,26 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Loom model-checking suite. New `lattice-loom-tests` workspace
+  member that drives the conflict-detection state machine under
+  every legal interleaving of two and three threads. Two
+  invariants are pinned: the `(write_seq` bump, `last_writes`
+  insert) pair recorded by `record_write` is observed atomically
+  by any later reader, and a concurrent trim never drops an
+  entry an in-flight transaction still needs. Loom is opt-in;
+  default `cargo test` skips it. Run the suite with
+  `RUSTFLAGS="--cfg loom" cargo test -p lattice-loom-tests --release`.
+  Closes the v1.6 (conflict detection) and v1.10 (last-writes
+  trim) reasoning gap that was previously hand-checked.
+- `crates/lattice-core/src/conflict_tracker.rs` extracts the
+  `(write_seq`, `last_writes`, `active_tx`) trio behind a single
+  `ConflictTracker` API. `Inner` now holds one `tracker` field
+  and delegates every bump, lookup, and trim through it. The
+  module uses `std::sync::Mutex` rather than `parking_lot` so
+  loom can shadow the primitives under `--cfg loom`; the lock is
+  held only across a single `BTreeMap` operation, so the
+  difference vs. `parking_lot` is below the noise floor of the
+  surrounding I/O.
 - `deny.toml` at the workspace root, plus a `cargo deny check`
   job in CI. Audits advisories, licences (explicit allow list),
   duplicate dependencies (warn), wildcard versions (deny), and

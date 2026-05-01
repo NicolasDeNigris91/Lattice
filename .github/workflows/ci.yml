@@ -196,6 +196,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-targets --all-features
 
+  loom:
+    name: loom (model checking)
+    runs-on: ubuntu-latest
+    # Drives the conflict-tracker state machine under every legal
+    # interleaving of two and three threads via the `loom` crate.
+    # Linux-only because loom's combinatorial cost on a slower
+    # Windows runner is not worth the redundancy. The suite lives
+    # in its own workspace member so the `--cfg loom` flag does
+    # not collide with `tokio` (which itself uses loom and only
+    # builds under specific feature flags).
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run loom tests
+        run: cargo test -p lattice-loom-tests --release
+        env:
+          RUSTFLAGS: "--cfg loom"
+
   book:
     name: mdbook build
     runs-on: ubuntu-latest

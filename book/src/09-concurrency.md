@@ -185,3 +185,55 @@ the M3 roadmap.
 non-durable record, sleeps past the window, then `mem::forget`s
 the handle to skip Drop. The reopen must still see the value,
 which it does only because the timer fired.
+
+## Loom model checking
+
+Standard tests sample one of many possible thread schedules each
+time they run. That is enough to catch the obvious races, but a
+schedule the OS happens never to pick on the CI runner can still
+hide a real ordering bug. v1.11 closes that gap for the
+conflict-detection state machine by adding a
+[`loom`](https://docs.rs/loom) suite that exercises the actual
+production code under every legal interleaving of two and three
+threads.
+
+The state under test is owned by `ConflictTracker`
+(`crates/lattice-core/src/conflict_tracker.rs`), the module that
+holds the monotonic `write_seq` counter, the `key -> last seq`
+map, and the in-flight `snapshot_seq` multiset. The engine
+delegates every bump, lookup, and trim through this tracker, so
+the loom tests cover the same code path that runs in production.
+The tracker uses `std::sync::Mutex` rather than `parking_lot`
+because loom shadows the `std::sync` primitives under
+`--cfg loom`. Critical sections are short (one `BTreeMap`
+operation), so the difference vs. `parking_lot` is below the
+noise floor of the surrounding I/O.
+
+Two invariants are pinned:
+
+- `record_write_pair_is_visible_atomically` proves that the
+  (`write_seq` bump, `last_writes` insert) pair recorded by
+  `record_write` is observed atomically by any later reader. If
+  a transaction ever saw `write_seq` advance past its
+  `snapshot_seq` while the corresponding `last_writes` entry was
+  still missing, its commit-time conflict check would silently
+  miss the conflict and lose snapshot isolation. Loom interleaves
+  a writer thread and a transaction thread and asserts the pair
+  is visible together.
+- `trim_preserves_entries_an_active_transaction_might_need`
+  proves that the size-triggered trim never drops an entry an
+  in-flight transaction may still need. Loom interleaves three
+  threads (the in-flight transaction, the writer, the trimmer)
+  and asserts that any entry whose `seq` is greater than the
+  registered `snapshot_seq` survives the trim.
+
+The suite lives in its own workspace member,
+`crates/lattice-loom-tests`, so it can avoid pulling in `tokio`
+(which does not build under `--cfg loom`). The crate is empty
+under default builds and only carries weight when you opt in:
+
+```bash
+RUSTFLAGS="--cfg loom" cargo test -p lattice-loom-tests --release
+```
+
+CI runs the suite on Linux on every push.
