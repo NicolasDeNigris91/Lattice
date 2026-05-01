@@ -66,6 +66,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   `.cargo/mutants.toml` and excludes test, bench, and fuzz
   harnesses, plus `Debug` / `Display` impls. Local-run recipe
   is documented in `CONTRIBUTING.md`.
+- `missing_docs = "warn"` in the workspace lint set. Combined
+  with the existing `RUSTFLAGS=-D warnings` in CI, this makes a
+  doc comment on every public item a hard CI requirement
+  going forward. The current codebase already passed without
+  any new doc comments needed; the lint locks in the standard
+  before drift can sneak in.
 - Compile-checked doctests on the three highest-traffic public
   items: the `Lattice` struct (overview example with a cloned
   handle reading from a spawned thread), `Lattice::open` (open,

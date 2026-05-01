@@ -3,6 +3,11 @@
 //! Run with `cargo bench -p lattice-core`. Reports land at
 //! `target/criterion/report/index.html`.
 
+// `criterion_group!` and `criterion_main!` expand to `pub fn` items
+// without doc comments. The workspace `missing_docs` lint would
+// otherwise fire on every bench file.
+#![allow(missing_docs)]
+
 use std::hint::black_box;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
