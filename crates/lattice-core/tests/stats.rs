@@ -12,6 +12,8 @@
 //!   non-empty level holds at most one sstable and the
 //!   `total_sstables` helper agrees with the sum.
 
+use std::time::Duration;
+
 use lattice_core::{Lattice, Stats};
 use tempfile::tempdir;
 
@@ -106,6 +108,33 @@ fn stats_is_a_value_snapshot_not_a_live_view() {
     let after = db.stats();
     assert_eq!(after.memtable_bytes, 0);
     assert_eq!(after.total_sstables(), 1);
+}
+
+#[test]
+fn config_reports_builder_values_after_open() {
+    let dir = tempdir().unwrap();
+    let db = Lattice::builder(dir.path())
+        .flush_threshold_bytes(1024 * 16)
+        .compaction_threshold(7)
+        .commit_window(Duration::from_millis(42))
+        .commit_batch(99)
+        .open()
+        .unwrap();
+
+    let config = db.config();
+    assert_eq!(config.flush_threshold_bytes, 1024 * 16);
+    assert_eq!(config.compaction_threshold, 7);
+    assert_eq!(config.commit_window, Duration::from_millis(42));
+    assert_eq!(config.commit_batch, 99);
+
+    // Defaults round-trip too.
+    let dir2 = tempdir().unwrap();
+    let db2 = Lattice::open(dir2.path()).unwrap();
+    let default_config = db2.config();
+    assert!(default_config.flush_threshold_bytes > 0);
+    assert!(default_config.compaction_threshold > 0);
+    assert!(default_config.commit_batch > 0);
+    assert!(default_config.commit_window > Duration::from_secs(0));
 }
 
 #[test]

@@ -212,6 +212,32 @@ impl Stats {
     }
 }
 
+/// Effective runtime configuration of an open [`Lattice`] handle,
+/// returned by [`Lattice::config`]. The fields mirror the
+/// [`LatticeBuilder`] knobs after defaults have been applied.
+///
+/// Useful for an operator who wants to verify the engine is
+/// running with the configuration they think it is, and for tests
+/// that want to assert a builder value actually stuck. Cheap to
+/// construct: every field is read directly off `Inner` without a
+/// lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Config {
+    /// In-memory size at which the memtable auto-flushes. See
+    /// [`LatticeBuilder::flush_threshold_bytes`].
+    pub flush_threshold_bytes: usize,
+    /// Number of live `SSTable`s in a single level that triggers
+    /// auto-compaction. See [`LatticeBuilder::compaction_threshold`].
+    pub compaction_threshold: usize,
+    /// Maximum time a non-durable write may sit in the WAL buffer
+    /// before the background flusher syncs it. See
+    /// [`LatticeBuilder::commit_window`].
+    pub commit_window: Duration,
+    /// Number of buffered non-durable writes that triggers an
+    /// inline `fsync`. See [`LatticeBuilder::commit_batch`].
+    pub commit_batch: usize,
+}
+
 /// Per-write knobs. Today this is only `durable`; future options
 /// (e.g. write priority) will land here without breaking callers.
 #[derive(Debug, Clone, Copy)]
@@ -374,6 +400,11 @@ struct Inner {
     flush_threshold_bytes: usize,
     compaction_threshold: usize,
     commit_batch: usize,
+    /// Mirror of the builder's `commit_window` value so
+    /// [`Lattice::config`] can return it. The flusher thread
+    /// captures the same value at spawn time; the field stored
+    /// here is read-only and exists for introspection only.
+    commit_window: Duration,
     /// Set to `true` to ask the background flusher to stop. The
     /// thread also exits if `Weak::upgrade` returns `None`.
     flusher_stop: AtomicBool,
@@ -651,6 +682,7 @@ impl Lattice {
             flush_threshold_bytes,
             compaction_threshold,
             commit_batch,
+            commit_window,
             flusher_stop: AtomicBool::new(false),
             flusher_join: Mutex::new(None),
             compactor: Arc::new(CompactorShared::new()),
@@ -1213,6 +1245,34 @@ impl Lattice {
     /// Path to the database directory.
     pub fn path(&self) -> &Path {
         &self.inner.path
+    }
+
+    /// Effective runtime configuration of this handle, returned
+    /// as an owned [`Config`] value. Cheap to call (one struct
+    /// build, no locks). Useful for an operator who wants to
+    /// verify the engine is running with the configuration they
+    /// think it is, and for tests that need to assert a builder
+    /// value actually stuck.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use lattice_core::Lattice;
+    /// let dir = tempfile::tempdir()?;
+    /// let db = Lattice::builder(dir.path())
+    ///     .compaction_threshold(2)
+    ///     .open()?;
+    /// assert_eq!(db.config().compaction_threshold, 2);
+    /// # Ok::<_, Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn config(&self) -> Config {
+        Config {
+            flush_threshold_bytes: self.inner.flush_threshold_bytes,
+            compaction_threshold: self.inner.compaction_threshold,
+            commit_window: self.inner.commit_window,
+            commit_batch: self.inner.commit_batch,
+        }
     }
 
     /// Snapshot of operational counters, sized for dashboards
