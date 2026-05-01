@@ -38,7 +38,7 @@ fn bench_sequential_write(c: &mut Criterion) {
             fresh_db,
             |(dir, db)| {
                 for i in 0..N {
-                    db.put(&key(i), b"value-bytes").unwrap();
+                    db.put(key(i), b"value-bytes").unwrap();
                 }
                 // Return both so Criterion drops them after stopping
                 // the wall-clock timer, not inside the measurement.
@@ -61,7 +61,7 @@ fn bench_sequential_write_amortized(c: &mut Criterion) {
             |(dir, db)| {
                 let opts = WriteOptions { durable: false };
                 for i in 0..N {
-                    db.put_with(&key(i), b"value-bytes", opts).unwrap();
+                    db.put_with(key(i), b"value-bytes", opts).unwrap();
                 }
                 // Force the final sync so the measured cost includes
                 // the durability commitment, not just the buffered
@@ -79,7 +79,7 @@ fn bench_random_read_hits(c: &mut Criterion) {
     let dir = tempfile::tempdir().unwrap();
     let db = Lattice::open(dir.path()).unwrap();
     for i in 0..N {
-        db.put(&key(i), b"value-bytes").unwrap();
+        db.put(key(i), b"value-bytes").unwrap();
     }
     db.flush().unwrap();
 
@@ -90,7 +90,7 @@ fn bench_random_read_hits(c: &mut Criterion) {
             let mut i = 0usize;
             for _ in 0..N {
                 i = (i + 7919) % N;
-                let v = db.get(&key(i)).unwrap();
+                let v = db.get(key(i)).unwrap();
                 black_box(v);
             }
         });
@@ -103,7 +103,7 @@ fn bench_random_read_misses(c: &mut Criterion) {
     let dir = tempfile::tempdir().unwrap();
     let db = Lattice::open(dir.path()).unwrap();
     for i in 0..N {
-        db.put(&key(i), b"value-bytes").unwrap();
+        db.put(key(i), b"value-bytes").unwrap();
     }
     db.flush().unwrap();
 
@@ -112,7 +112,7 @@ fn bench_random_read_misses(c: &mut Criterion) {
             let mut i = N; // all keys here are above the populated range
             for _ in 0..N {
                 i = i.saturating_add(1);
-                let v = db.get(&key(i)).unwrap();
+                let v = db.get(key(i)).unwrap();
                 black_box(v);
             }
         });
@@ -124,7 +124,7 @@ fn bench_scan_all(c: &mut Criterion) {
     let dir = tempfile::tempdir().unwrap();
     let db = Lattice::open(dir.path()).unwrap();
     for i in 0..N {
-        db.put(&key(i), b"value-bytes").unwrap();
+        db.put(key(i), b"value-bytes").unwrap();
     }
     db.flush().unwrap();
 
@@ -150,7 +150,7 @@ fn bench_concurrent_random_read_hits(c: &mut Criterion) {
         let dir = tempfile::tempdir().unwrap();
         let db = Lattice::open(dir.path()).unwrap();
         for i in 0..N {
-            db.put(&key(i), b"value-bytes").unwrap();
+            db.put(key(i), b"value-bytes").unwrap();
         }
         db.flush().unwrap();
 
@@ -169,7 +169,7 @@ fn bench_concurrent_random_read_hits(c: &mut Criterion) {
                                 break;
                             }
                             i = (i + 7919) % N;
-                            let v = db.get(&key(i)).unwrap();
+                            let v = db.get(key(i)).unwrap();
                             black_box(v);
                         }
                     }));

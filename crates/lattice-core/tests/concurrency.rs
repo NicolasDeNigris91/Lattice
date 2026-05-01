@@ -77,7 +77,7 @@ fn many_readers_and_one_writer_see_consistent_state() {
         readers.push(thread::spawn(move || {
             while stop.load(Ordering::Acquire) == 0 {
                 for i in 0..WRITE_COUNT {
-                    if let Some(v) = db.get(&i.to_be_bytes()).unwrap() {
+                    if let Some(v) = db.get(i.to_be_bytes()).unwrap() {
                         // Any value we observe must be the canonical
                         // one the writer used for this key.
                         assert_eq!(
@@ -96,7 +96,7 @@ fn many_readers_and_one_writer_see_consistent_state() {
         let db = db.clone();
         thread::spawn(move || {
             for i in 0..WRITE_COUNT {
-                db.put(&i.to_be_bytes(), &i.to_le_bytes()).unwrap();
+                db.put(i.to_be_bytes(), i.to_le_bytes()).unwrap();
             }
         })
     };
@@ -110,7 +110,7 @@ fn many_readers_and_one_writer_see_consistent_state() {
     // All keys must be present after the writer finishes.
     for i in 0..WRITE_COUNT {
         assert_eq!(
-            db.get(&i.to_be_bytes()).unwrap(),
+            db.get(i.to_be_bytes()).unwrap(),
             Some(i.to_le_bytes().to_vec()),
             "key {i} missing after the writer joined"
         );

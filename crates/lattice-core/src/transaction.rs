@@ -57,8 +57,12 @@ impl Transaction<'_> {
     /// In-transaction writes shadow snapshot values, so the caller
     /// always observes its own most recent staged write. The key
     /// is recorded in the read-set for conflict detection at
-    /// commit time.
-    pub fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    /// commit time. Accepts any `AsRef<[u8]>` for the key.
+    pub fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>> {
+        self.get_inner(key.as_ref())
+    }
+
+    fn get_inner(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         self.read_set.insert(key.to_vec());
         if let Some(staged) = self.write_set.get(key) {
             return Ok(staged.clone());
@@ -68,14 +72,16 @@ impl Transaction<'_> {
 
     /// Stage a put. Visible to subsequent `get` calls inside this
     /// transaction; not visible to other handles until commit.
-    pub fn put(&mut self, key: &[u8], value: &[u8]) {
-        self.write_set.insert(key.to_vec(), Some(value.to_vec()));
+    /// Accepts any `AsRef<[u8]>` for both key and value.
+    pub fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
+        self.write_set
+            .insert(key.as_ref().to_vec(), Some(value.as_ref().to_vec()));
     }
 
     /// Stage a delete. Visible to subsequent `get` calls inside this
     /// transaction as `None`; not visible to other handles until
-    /// commit.
-    pub fn delete(&mut self, key: &[u8]) {
-        self.write_set.insert(key.to_vec(), None);
+    /// commit. Accepts any `AsRef<[u8]>` for the key.
+    pub fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
+        self.write_set.insert(key.as_ref().to_vec(), None);
     }
 }

@@ -144,14 +144,13 @@ fn many_keys_persist_in_order() {
     {
         let db = Lattice::open(dir.path()).unwrap();
         for i in 0u32..1000 {
-            db.put(&i.to_be_bytes(), format!("v{i}").as_bytes())
-                .unwrap();
+            db.put(i.to_be_bytes(), format!("v{i}").as_bytes()).unwrap();
         }
     }
     let db = Lattice::open(dir.path()).unwrap();
     for i in 0u32..1000 {
         assert_eq!(
-            db.get(&i.to_be_bytes()).unwrap(),
+            db.get(i.to_be_bytes()).unwrap(),
             Some(format!("v{i}").into_bytes()),
             "key {i} mismatch"
         );
@@ -172,7 +171,7 @@ fn builder_configures_flush_threshold() {
         .unwrap();
 
     for i in 0u32..32 {
-        db.put(&i.to_be_bytes(), &[b'x'; 64]).unwrap();
+        db.put(i.to_be_bytes(), [b'x'; 64]).unwrap();
     }
 
     let sst_count = std::fs::read_dir(dir.path())
@@ -189,5 +188,5 @@ fn builder_configures_flush_threshold() {
     // builder with defaults: reopening reads back what we wrote.
     drop(db);
     let db = Lattice::open(dir.path()).unwrap();
-    assert_eq!(db.get(&0u32.to_be_bytes()).unwrap(), Some(vec![b'x'; 64]));
+    assert_eq!(db.get(0u32.to_be_bytes()).unwrap(), Some(vec![b'x'; 64]));
 }

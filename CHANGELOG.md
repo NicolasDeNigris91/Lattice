@@ -7,6 +7,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- API ergonomics: `Lattice::{put, put_with, delete, get}`,
+  `Snapshot::get`, and `Transaction::{get, put, delete}` now
+  accept `impl AsRef<[u8]>` for keys and values. Existing
+  callers compile unchanged: `&[u8]`, `&[u8; N]`, `&Vec<u8>`,
+  `Vec<u8>`, `Box<[u8]>`, and `&str::as_bytes()` all impl
+  `AsRef<[u8]>` and resolve through the same monomorphic inner
+  body. The generic wrapper is a one-line forward, so binary
+  size impact is bounded by call-site count rather than by
+  generic-instantiation cost.
+
 ### Added
 - `deny.toml` at the workspace root, plus a `cargo deny check`
   job in CI. Audits advisories, licences (explicit allow list),

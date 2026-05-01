@@ -129,7 +129,7 @@ fn snapshot_serves_multi_block_reads_after_files_unlinked() {
     // ~64 KiB of payload per block fills well past the 4 KiB target.
     let large_value = vec![b'x'; 256];
     for i in 0u32..2000 {
-        db.put(&i.to_be_bytes(), &large_value).unwrap();
+        db.put(i.to_be_bytes(), &large_value).unwrap();
     }
     db.flush().unwrap();
 
@@ -139,7 +139,7 @@ fn snapshot_serves_multi_block_reads_after_files_unlinked() {
     // path is removed (POSIX unlink succeeds; Windows logs a warning
     // and defers to orphan cleanup, both fine for the snapshot).
     for i in 0u32..50 {
-        db.put(&i.to_be_bytes(), b"new").unwrap();
+        db.put(i.to_be_bytes(), b"new").unwrap();
     }
     db.flush().unwrap();
     db.compact().unwrap();
@@ -149,14 +149,14 @@ fn snapshot_serves_multi_block_reads_after_files_unlinked() {
     // multiple data blocks.
     for i in [0u32, 100, 999, 1500, 1999] {
         assert_eq!(
-            snap.get(&i.to_be_bytes()).unwrap(),
+            snap.get(i.to_be_bytes()).unwrap(),
             Some(large_value.clone()),
             "snapshot lost key {i}"
         );
     }
 
     // Live database shows the rewrite.
-    assert_eq!(db.get(&0u32.to_be_bytes()).unwrap(), Some(b"new".to_vec()));
+    assert_eq!(db.get(0u32.to_be_bytes()).unwrap(), Some(b"new".to_vec()));
 }
 
 #[test]

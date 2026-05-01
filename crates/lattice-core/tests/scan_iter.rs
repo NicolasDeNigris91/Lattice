@@ -102,8 +102,7 @@ fn scan_iter_yields_strictly_increasing_keys() {
     let dir = tempdir().unwrap();
     let db = Lattice::open(dir.path()).unwrap();
     for i in 0..100u32 {
-        db.put(&i.to_be_bytes(), format!("v{i}").as_bytes())
-            .unwrap();
+        db.put(i.to_be_bytes(), format!("v{i}").as_bytes()).unwrap();
         if i % 17 == 0 {
             db.flush().unwrap();
         }
@@ -111,7 +110,7 @@ fn scan_iter_yields_strictly_increasing_keys() {
     // Overwrite half of them in the active memtable so the merge
     // walks the same key from multiple tiers.
     for i in 0..50u32 {
-        db.put(&i.to_be_bytes(), format!("v{i}-new").as_bytes())
+        db.put(i.to_be_bytes(), format!("v{i}-new").as_bytes())
             .unwrap();
     }
 

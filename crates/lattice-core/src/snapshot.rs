@@ -40,8 +40,12 @@ impl Snapshot {
     }
 
     /// Read the value of `key` as it existed when the snapshot was
-    /// created.
-    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    /// created. Accepts any `AsRef<[u8]>` for the key.
+    pub fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>> {
+        self.get_inner(key.as_ref())
+    }
+
+    fn get_inner(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         match self.memtable.lookup(key) {
             Lookup::Found(value) => return Ok(Some(value.to_vec())),
             Lookup::Tombstoned => return Ok(None),

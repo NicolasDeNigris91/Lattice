@@ -642,12 +642,27 @@ impl Lattice {
 
     /// Insert or overwrite a value for `key` with explicit per-write
     /// options. See [`WriteOptions`] for the durability trade-off.
+    ///
+    /// Accepts any `AsRef<[u8]>` for both key and value, so byte
+    /// slices, `Vec<u8>`, byte arrays, and `&str` (via the
+    /// `str::as_bytes` deref) all work without explicit
+    /// conversion. The generic boundary is a thin wrapper that
+    /// forwards to a monomorphic inner; binary size impact is
+    /// negligible.
+    pub fn put_with<K, V>(&self, key: K, value: V, opts: WriteOptions) -> Result<()>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        self.put_with_inner(key.as_ref(), value.as_ref(), opts)
+    }
+
     #[instrument(
         level = "debug",
         skip(self, value),
         fields(key_len = key.len(), value_len = value.len(), durable = opts.durable),
     )]
-    pub fn put_with(&self, key: &[u8], value: &[u8], opts: WriteOptions) -> Result<()> {
+    fn put_with_inner(&self, key: &[u8], value: &[u8], opts: WriteOptions) -> Result<()> {
         let started = Instant::now();
         let entry = LogEntry::Put {
             key: key.to_vec(),
@@ -666,15 +681,25 @@ impl Lattice {
     }
 
     /// Insert or overwrite a value for `key`. Equivalent to
-    /// `put_with(key, value, WriteOptions::default())`.
-    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+    /// `put_with(key, value, WriteOptions::default())`. Accepts
+    /// any `AsRef<[u8]>` for both key and value.
+    pub fn put<K, V>(&self, key: K, value: V) -> Result<()>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
         self.put_with(key, value, WriteOptions::default())
     }
 
     /// Delete `key`. A subsequent `get` returns `None`. Always
     /// durable on return; non-durable deletes are not yet exposed.
+    /// Accepts any `AsRef<[u8]>` for the key.
+    pub fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<()> {
+        self.delete_inner(key.as_ref())
+    }
+
     #[instrument(level = "debug", skip(self), fields(key_len = key.len()))]
-    pub fn delete(&self, key: &[u8]) -> Result<()> {
+    fn delete_inner(&self, key: &[u8]) -> Result<()> {
         let started = Instant::now();
         let entry = LogEntry::Delete { key: key.to_vec() };
         let needs_flush = {
@@ -760,9 +785,14 @@ impl Lattice {
         Ok(needs_flush)
     }
 
-    /// Read the current value for `key`, or `None` if absent or deleted.
+    /// Read the current value for `key`, or `None` if absent or
+    /// deleted. Accepts any `AsRef<[u8]>` for the key.
+    pub fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>> {
+        self.get_dispatch(key.as_ref())
+    }
+
     #[instrument(level = "trace", skip(self), fields(key_len = key.len()))]
-    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    fn get_dispatch(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let started = Instant::now();
         let value = self.get_inner(key)?;
         metrics_compat::record_get(started.elapsed(), value.is_some());

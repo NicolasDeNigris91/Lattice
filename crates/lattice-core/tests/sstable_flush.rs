@@ -61,7 +61,7 @@ fn data_persists_through_flush_and_reopen() {
     {
         let db = Lattice::open(dir.path()).unwrap();
         for i in 0u32..50 {
-            db.put(&i.to_be_bytes(), format!("value-{i}").as_bytes())
+            db.put(i.to_be_bytes(), format!("value-{i}").as_bytes())
                 .unwrap();
         }
         db.flush().unwrap();
@@ -70,7 +70,7 @@ fn data_persists_through_flush_and_reopen() {
     let db = Lattice::open(dir.path()).unwrap();
     for i in 0u32..50 {
         assert_eq!(
-            db.get(&i.to_be_bytes()).unwrap(),
+            db.get(i.to_be_bytes()).unwrap(),
             Some(format!("value-{i}").into_bytes()),
             "key {i} missing after reopen"
         );
@@ -177,7 +177,7 @@ fn many_keys_across_multiple_flushes() {
         for batch in 0u32..3 {
             for i in 0u32..200 {
                 let key = (batch * 1000 + i).to_be_bytes();
-                db.put(&key, format!("v{batch}-{i}").as_bytes()).unwrap();
+                db.put(key, format!("v{batch}-{i}").as_bytes()).unwrap();
             }
             db.flush().unwrap();
         }
@@ -189,7 +189,7 @@ fn many_keys_across_multiple_flushes() {
         for i in 0u32..200 {
             let key = (batch * 1000 + i).to_be_bytes();
             assert_eq!(
-                db.get(&key).unwrap(),
+                db.get(key).unwrap(),
                 Some(format!("v{batch}-{i}").into_bytes()),
                 "key {batch}/{i} missing after multi-flush reopen"
             );

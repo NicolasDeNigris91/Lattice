@@ -91,8 +91,7 @@ fn compaction_state_survives_reopen() {
     {
         let db = Lattice::open(dir.path()).unwrap();
         for i in 0u32..10 {
-            db.put(&i.to_be_bytes(), format!("v{i}").as_bytes())
-                .unwrap();
+            db.put(i.to_be_bytes(), format!("v{i}").as_bytes()).unwrap();
             db.flush().unwrap();
         }
         db.compact().unwrap();
@@ -102,7 +101,7 @@ fn compaction_state_survives_reopen() {
     assert_eq!(count_sst_files(dir.path()), 1);
     for i in 0u32..10 {
         assert_eq!(
-            db.get(&i.to_be_bytes()).unwrap(),
+            db.get(i.to_be_bytes()).unwrap(),
             Some(format!("v{i}").into_bytes())
         );
     }
@@ -240,15 +239,14 @@ fn data_survives_cascading_leveled_compaction() {
         .unwrap();
 
     for i in 0u32..16 {
-        db.put(&i.to_be_bytes(), format!("v{i}").as_bytes())
-            .unwrap();
+        db.put(i.to_be_bytes(), format!("v{i}").as_bytes()).unwrap();
         db.flush().unwrap();
     }
     db.compact().unwrap();
 
     for i in 0u32..16 {
         assert_eq!(
-            db.get(&i.to_be_bytes()).unwrap(),
+            db.get(i.to_be_bytes()).unwrap(),
             Some(format!("v{i}").into_bytes()),
             "key {i} missing after cascading compaction"
         );
@@ -264,8 +262,7 @@ fn many_flushes_then_compact_preserves_all_keys() {
         .unwrap();
 
     for i in 0u32..200 {
-        db.put(&i.to_be_bytes(), format!("v{i}").as_bytes())
-            .unwrap();
+        db.put(i.to_be_bytes(), format!("v{i}").as_bytes()).unwrap();
         if i % 10 == 9 {
             db.flush().unwrap();
         }
@@ -279,7 +276,7 @@ fn many_flushes_then_compact_preserves_all_keys() {
 
     for i in 0u32..200 {
         assert_eq!(
-            db.get(&i.to_be_bytes()).unwrap(),
+            db.get(i.to_be_bytes()).unwrap(),
             Some(format!("v{i}").into_bytes()),
             "key {i} missing after compact"
         );

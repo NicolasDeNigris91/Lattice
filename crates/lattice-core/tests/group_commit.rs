@@ -53,7 +53,7 @@ fn non_durable_writes_persist_after_explicit_flush_wal_and_reopen() {
     {
         let db = Lattice::open(dir.path()).unwrap();
         for i in 0u32..200 {
-            db.put_with(&i.to_be_bytes(), b"v", WriteOptions { durable: false })
+            db.put_with(i.to_be_bytes(), b"v", WriteOptions { durable: false })
                 .unwrap();
         }
         db.flush_wal().unwrap();
@@ -61,7 +61,7 @@ fn non_durable_writes_persist_after_explicit_flush_wal_and_reopen() {
     let db = Lattice::open(dir.path()).unwrap();
     for i in 0u32..200 {
         assert_eq!(
-            db.get(&i.to_be_bytes()).unwrap(),
+            db.get(i.to_be_bytes()).unwrap(),
             Some(b"v".to_vec()),
             "key {i} missing after flush_wal + reopen"
         );
@@ -109,7 +109,7 @@ fn commit_batch_threshold_makes_non_durable_durable_without_flush_wal() {
         .open()
         .unwrap();
     for i in 0u32..8 {
-        db.put_with(&i.to_be_bytes(), b"v", WriteOptions { durable: false })
+        db.put_with(i.to_be_bytes(), b"v", WriteOptions { durable: false })
             .unwrap();
     }
     std::mem::forget(db);
@@ -117,7 +117,7 @@ fn commit_batch_threshold_makes_non_durable_durable_without_flush_wal() {
     let db = Lattice::open(dir.path()).unwrap();
     for i in 0u32..8 {
         assert_eq!(
-            db.get(&i.to_be_bytes()).unwrap(),
+            db.get(i.to_be_bytes()).unwrap(),
             Some(b"v".to_vec()),
             "key {i} must survive: the 8th non-durable put crossed the batch threshold"
         );

@@ -22,7 +22,10 @@ fn parse_balance(bytes: Option<&[u8]>) -> i64 {
 }
 
 fn render(bytes: Option<&[u8]>) -> String {
-    bytes.map_or_else(|| "<absent>".to_string(), |b| String::from_utf8_lossy(b).into_owned())
+    bytes.map_or_else(
+        || "<absent>".to_string(),
+        |b| String::from_utf8_lossy(b).into_owned(),
+    )
 }
 
 fn main() -> Result<()> {
