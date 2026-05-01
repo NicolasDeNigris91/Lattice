@@ -35,17 +35,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   mirrors the CI bar so contributors can pre-flight before
   pushing.
 - `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1).
-- Two new property tests in `tests/property_durability.rs`:
+- Three new property tests in `tests/property_durability.rs`:
   `snapshot_isolates_reads_from_subsequent_writes` (a snapshot
   taken at point `t` returns values as of `t`; subsequent
-  writes do not change what the snapshot sees) and
+  writes do not change what the snapshot sees),
   `compaction_preserves_last_writer_wins` (forced compaction
   is a pure data-preserving rearrangement; every key reads
-  back to the reference's value without a reopen). Each runs
-  64 cases per `cargo test`. Together with the existing
-  reopen-roundtrip property they form the project's
-  three-pillar correctness fence: replay-on-reopen, snapshot
-  isolation, and compaction equivalence.
+  back to the reference's value without a reopen), and
+  `transaction_ok_commits_err_rolls_back` (random sequences
+  of plain put / delete and `Ok` / `Err` transaction closures
+  converge to the same state as a `BTreeMap` reference that
+  applies `Ok` closures and treats `Err` ones as no-ops).
+  Each runs 64 cases per `cargo test`. Together with the
+  existing reopen-roundtrip property they form the project's
+  four-pillar correctness fence: replay-on-reopen, snapshot
+  isolation, compaction equivalence, and transactional
+  rollback semantics.
 - `.github/workflows/book.yml` deploys the mdBook to GitHub
   Pages on every push that touches `book/**`. Acts as a free
   redundant mirror of the Railway-hosted book at

@@ -9,8 +9,9 @@
 //! that overwrites and tombstones are exercised on every run.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io;
 
-use lattice_core::Lattice;
+use lattice_core::{Error, Lattice};
 use proptest::prelude::*;
 use tempfile::tempdir;
 
@@ -22,6 +23,23 @@ enum Op {
     Flush,
     /// Force a compaction that merges every `SSTable` into one.
     Compact,
+}
+
+/// A single staged operation inside a transaction closure.
+#[derive(Debug, Clone)]
+enum Stage {
+    Put(Vec<u8>, Vec<u8>),
+    Delete(Vec<u8>),
+}
+
+/// A step in a transactional op sequence: a plain put / delete,
+/// or a transaction that ends with `Ok` / `Err`.
+#[derive(Debug, Clone)]
+enum TxStep {
+    Put(Vec<u8>, Vec<u8>),
+    Delete(Vec<u8>),
+    TxOk(Vec<Stage>),
+    TxErr(Vec<Stage>),
 }
 
 fn arb_key() -> impl Strategy<Value = Vec<u8>> {
@@ -152,6 +170,129 @@ proptest! {
                 snap.get(key).unwrap(),
                 at_snapshot.get(key).cloned(),
                 "snapshot saw a post-snapshot mutation for key {:?}",
+                key,
+            );
+        }
+    }
+
+    /// A transaction that returns `Ok` is equivalent to applying
+    /// its staged writes through the regular `put` / `delete`
+    /// path; a transaction that returns `Err` is a no-op. Pinned
+    /// here under random op sequences interleaved with both
+    /// outcomes, against a reference `BTreeMap` that mirrors the
+    /// commit-or-rollback semantics. With no concurrent writers
+    /// the conflict detector never fires, so every `Ok` commit
+    /// must succeed.
+    #[test]
+    fn transaction_ok_commits_err_rolls_back(
+        ops in proptest::collection::vec(
+            prop_oneof![
+                4 => (arb_key(), arb_value()).prop_map(|(k, v)| TxStep::Put(k, v)),
+                2 => arb_key().prop_map(TxStep::Delete),
+                3 => proptest::collection::vec(
+                    prop_oneof![
+                        1 => (arb_key(), arb_value()).prop_map(|(k, v)| Stage::Put(k, v)),
+                        1 => arb_key().prop_map(Stage::Delete),
+                    ],
+                    0..6,
+                ).prop_map(TxStep::TxOk),
+                1 => proptest::collection::vec(
+                    prop_oneof![
+                        1 => (arb_key(), arb_value()).prop_map(|(k, v)| Stage::Put(k, v)),
+                        1 => arb_key().prop_map(Stage::Delete),
+                    ],
+                    0..6,
+                ).prop_map(TxStep::TxErr),
+            ],
+            0..40,
+        ),
+    ) {
+        let dir = tempdir().unwrap();
+        let db = Lattice::open(dir.path()).unwrap();
+
+        let mut reference: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        let mut all_keys: BTreeSet<Vec<u8>> = BTreeSet::new();
+
+        for step in &ops {
+            match step {
+                TxStep::Put(k, v) => {
+                    db.put(k, v).unwrap();
+                    reference.insert(k.clone(), v.clone());
+                    all_keys.insert(k.clone());
+                }
+                TxStep::Delete(k) => {
+                    db.delete(k).unwrap();
+                    reference.remove(k);
+                    all_keys.insert(k.clone());
+                }
+                TxStep::TxOk(stages) => {
+                    let result = db.transaction(|tx| {
+                        for stage in stages {
+                            match stage {
+                                Stage::Put(k, v) => tx.put(k, v),
+                                Stage::Delete(k) => tx.delete(k),
+                            }
+                        }
+                        Ok::<_, Error>(())
+                    });
+                    prop_assert!(
+                        result.is_ok(),
+                        "an Ok-returning transaction with no concurrent writers must commit, got {result:?}",
+                    );
+                    for stage in stages {
+                        match stage {
+                            Stage::Put(k, v) => {
+                                reference.insert(k.clone(), v.clone());
+                                all_keys.insert(k.clone());
+                            }
+                            Stage::Delete(k) => {
+                                reference.remove(k);
+                                all_keys.insert(k.clone());
+                            }
+                        }
+                    }
+                }
+                TxStep::TxErr(stages) => {
+                    let result: Result<(), Error> = db.transaction(|tx| {
+                        for stage in stages {
+                            match stage {
+                                Stage::Put(k, v) => tx.put(k, v),
+                                Stage::Delete(k) => tx.delete(k),
+                            }
+                            // Track the key so we can later assert the
+                            // staged write was rolled back.
+                            match stage {
+                                Stage::Put(k, _) | Stage::Delete(k) => {
+                                    let _ = k;
+                                }
+                            }
+                        }
+                        Err(Error::Io(io::Error::other("rollback")))
+                    });
+                    prop_assert!(
+                        matches!(result, Err(Error::Io(_))),
+                        "the closure's Err should bubble out, got {result:?}",
+                    );
+                    // Record the keys for the assertion sweep so a
+                    // staged-then-rolled-back write that happened to
+                    // match an existing reference value is still
+                    // verified.
+                    for stage in stages {
+                        match stage {
+                            Stage::Put(k, _) | Stage::Delete(k) => {
+                                all_keys.insert(k.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for key in &all_keys {
+            prop_assert_eq!(
+                db.get(key).unwrap(),
+                reference.get(key).cloned(),
+                "transactional sequence diverged for key {:?}",
                 key,
             );
         }
