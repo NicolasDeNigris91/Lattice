@@ -35,6 +35,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   and `categories` (the workspace defaults are library-shaped).
 - `CONTRIBUTING.md` adds the `cargo deny` and coverage rows to
   the project bar and points to the new code of conduct.
+- `README.md` is restructured for first-impression density: a
+  Features section near the top, three "at a glance" examples
+  (sync, transactional, async), and a "Where Lattice fits"
+  paragraph that names sled, fjall, and RocksDB up front. The
+  long roadmap table is collapsed under a `<details>` element.
+  A new Contributing section points at the code of conduct and
+  the security advisory form.
 
 ### Notes
 - No version bump. Pure infrastructure; the next feature
