@@ -35,6 +35,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   mirrors the CI bar so contributors can pre-flight before
   pushing.
 - `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1).
+- Two new property tests in `tests/property_durability.rs`:
+  `snapshot_isolates_reads_from_subsequent_writes` (a snapshot
+  taken at point `t` returns values as of `t`; subsequent
+  writes do not change what the snapshot sees) and
+  `compaction_preserves_last_writer_wins` (forced compaction
+  is a pure data-preserving rearrangement; every key reads
+  back to the reference's value without a reopen). Each runs
+  64 cases per `cargo test`. Together with the existing
+  reopen-roundtrip property they form the project's
+  three-pillar correctness fence: replay-on-reopen, snapshot
+  isolation, and compaction equivalence.
 - Cross-platform binary release artifacts. The `release.yml`
   workflow now builds the `lattice` CLI for x86_64 / aarch64
   Linux, x86_64 / aarch64 macOS, and x86_64 Windows on every

@@ -50,6 +50,37 @@ fn arb_op() -> impl Strategy<Value = Op> {
     ]
 }
 
+/// Replay an op sequence against a `Lattice` and a parallel
+/// `BTreeMap` reference. Records every distinct key the sequence
+/// touched so the caller can iterate over it for assertions.
+fn replay(
+    db: &Lattice,
+    ops: &[Op],
+    reference: &mut BTreeMap<Vec<u8>, Vec<u8>>,
+    all_keys: &mut BTreeSet<Vec<u8>>,
+) {
+    for op in ops {
+        match op {
+            Op::Put(k, v) => {
+                db.put(k, v).unwrap();
+                reference.insert(k.clone(), v.clone());
+                all_keys.insert(k.clone());
+            }
+            Op::Delete(k) => {
+                db.delete(k).unwrap();
+                reference.remove(k);
+                all_keys.insert(k.clone());
+            }
+            Op::Flush => {
+                db.flush().unwrap();
+            }
+            Op::Compact => {
+                db.compact().unwrap();
+            }
+        }
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 64,
@@ -67,26 +98,7 @@ proptest! {
         // First session: apply every operation, then drop the Lattice.
         {
             let db = Lattice::open(dir.path()).unwrap();
-            for op in &ops {
-                match op {
-                    Op::Put(k, v) => {
-                        db.put(k, v).unwrap();
-                        reference.insert(k.clone(), v.clone());
-                        all_keys.insert(k.clone());
-                    }
-                    Op::Delete(k) => {
-                        db.delete(k).unwrap();
-                        reference.remove(k);
-                        all_keys.insert(k.clone());
-                    }
-                    Op::Flush => {
-                        db.flush().unwrap();
-                    }
-                    Op::Compact => {
-                        db.compact().unwrap();
-                    }
-                }
-            }
+            replay(&db, &ops, &mut reference, &mut all_keys);
         }
 
         // Second session: every key the test ever touched must match the
@@ -97,6 +109,87 @@ proptest! {
                 db.get(key).unwrap(),
                 reference.get(key).cloned(),
                 "key {:?} diverged after reopen",
+                key,
+            );
+        }
+    }
+
+    /// A snapshot taken at point `t` returns values as of `t`.
+    /// Subsequent writes through the parent handle do not change
+    /// what the snapshot sees. This is the read-isolation
+    /// guarantee that v1.2's `Send + Sync + Clone` work made the
+    /// load-bearing primitive of v1.4 transactions.
+    ///
+    /// The test splits a random op sequence at a random index,
+    /// applies the prefix, takes a snapshot, applies the suffix,
+    /// and asserts that the snapshot's view of every touched key
+    /// matches a reference `BTreeMap` built only from the prefix.
+    #[test]
+    fn snapshot_isolates_reads_from_subsequent_writes(
+        ops in proptest::collection::vec(arb_op(), 1..120),
+        snapshot_at in any::<prop::sample::Index>(),
+    ) {
+        let dir = tempdir().unwrap();
+        let db = Lattice::open(dir.path()).unwrap();
+
+        let split = snapshot_at.index(ops.len());
+        let (prefix, suffix) = ops.split_at(split);
+
+        let mut at_snapshot: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        let mut all_keys: BTreeSet<Vec<u8>> = BTreeSet::new();
+        replay(&db, prefix, &mut at_snapshot, &mut all_keys);
+
+        let snap = db.snapshot();
+
+        // Build a separate reference that grows past the snapshot
+        // point. The post-snapshot writes must not be visible to
+        // `snap.get`.
+        let mut after_snapshot = at_snapshot.clone();
+        replay(&db, suffix, &mut after_snapshot, &mut all_keys);
+
+        for key in &all_keys {
+            prop_assert_eq!(
+                snap.get(key).unwrap(),
+                at_snapshot.get(key).cloned(),
+                "snapshot saw a post-snapshot mutation for key {:?}",
+                key,
+            );
+        }
+    }
+
+    /// `compact()` is a pure data-preserving rearrangement of the
+    /// on-disk SSTables. After a forced compaction, every key the
+    /// test ever touched must read back to the same value the
+    /// reference holds, with no extra reopen needed.
+    ///
+    /// This is a tighter invariant than `arbitrary_ops_match_btreemap_after_reopen`,
+    /// which compacts as one of many random ops and only checks
+    /// after a reopen. Here we compact deterministically at the
+    /// end and check WITHOUT closing the handle, so a regression
+    /// in the in-memory level state (frozen memtable, level
+    /// installation, manifest write) shows up too.
+    #[test]
+    fn compaction_preserves_last_writer_wins(
+        ops in proptest::collection::vec(arb_op(), 0..150),
+    ) {
+        let dir = tempdir().unwrap();
+        let db = Lattice::open(dir.path()).unwrap();
+
+        let mut reference: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        let mut all_keys: BTreeSet<Vec<u8>> = BTreeSet::new();
+        replay(&db, &ops, &mut reference, &mut all_keys);
+
+        // Force everything through the WAL into an SSTable, then
+        // run leveled compaction until convergence. After this
+        // the database is at most one SSTable per level.
+        db.flush().unwrap();
+        db.compact().unwrap();
+
+        for key in &all_keys {
+            prop_assert_eq!(
+                db.get(key).unwrap(),
+                reference.get(key).cloned(),
+                "compaction lost or corrupted key {:?}",
                 key,
             );
         }
