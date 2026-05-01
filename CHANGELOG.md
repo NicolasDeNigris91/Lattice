@@ -63,6 +63,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   `cargo install`.
 
 ### Changed
+- Book chapter 8 ("What is not yet implemented") rewritten
+  to reflect the v1.10 state. Four of the seven original
+  v1.0 deferrals have shipped (group commit, parallel reads,
+  leveled compaction, transactions); they now appear under a
+  "Closed in earlier releases" section that names the
+  release that closed each one. The "Still open" section is
+  updated for the current set: replication, native async,
+  MVCC, strict RocksDB-style leveled compaction, streaming
+  scan, encryption at rest, fuzzing, loom, and a real
+  benchmark suite. Each open deferral names its tracked
+  release where one exists.
 - `Cargo.toml` polish for crates.io publishing: workspace gains
   a `documentation = "https://docs.rs/lattice-core"` field
   inherited by both crates; each crate gains an `include`
