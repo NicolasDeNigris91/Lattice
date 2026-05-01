@@ -122,6 +122,36 @@ jobs:
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  fuzz:
+    name: fuzz (nightly, warn-only)
+    runs-on: ubuntu-latest
+    # Quick smoke run of each fuzz target on every PR. 30 seconds
+    # per target catches obvious panics without blocking PRs on
+    # the slow exhaustive sweeps that belong to a longer schedule.
+    # `continue-on-error` keeps the job informational; a real
+    # finding shows in the run but does not gate the PR.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [wal_open, sstable_open, manifest_open]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/lattice-core/fuzz
+          key: ${{ matrix.target }}
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - name: Smoke run ${{ matrix.target }}
+        working-directory: crates/lattice-core/fuzz
+        run: |
+          cargo +nightly fuzz run ${{ matrix.target }} \
+            -- -max_total_time=30 -timeout=10
+
   miri:
     name: miri (nightly, warn-only)
     runs-on: ubuntu-latest

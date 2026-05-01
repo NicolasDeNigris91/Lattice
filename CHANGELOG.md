@@ -58,6 +58,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   per Pages convention (the latest commit wins). Requires
   "Source: GitHub Actions" in the repository's Pages settings
   before the first deploy.
+- Fuzzing scaffold under `crates/lattice-core/fuzz/`. Three
+  `cargo-fuzz` targets (`wal_open`, `sstable_open`,
+  `manifest_open`) write arbitrary bytes into a tempdir and
+  call `Lattice::open`, asserting that no input causes a
+  panic. The fuzz crate is intentionally outside the
+  workspace (it has its own `[workspace]` table) so its
+  libfuzzer compilation profile does not contaminate the
+  parent workspace's lints. The `fuzz` CI job runs each
+  target for 30 seconds on every PR as `continue-on-error`,
+  so panics surface but do not gate the PR. Long exhaustive
+  sweeps belong to a separate schedule. Contributing setup
+  is documented in `CONTRIBUTING.md`.
 - Cross-platform binary release artifacts. The `release.yml`
   workflow now builds the `lattice` CLI for x86_64 / aarch64
   Linux, x86_64 / aarch64 macOS, and x86_64 Windows on every

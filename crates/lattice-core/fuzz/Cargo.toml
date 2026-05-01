@@ -1,0 +1,46 @@
+[package]
+name = "lattice-core-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Fuzz crates are intentionally outside the workspace. They use a
+# separate compilation profile (libfuzzer + AddressSanitizer) that
+# does not compose with the workspace's normal lint settings, and
+# they need a nightly toolchain to run.
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tempfile = "3.10"
+
+[dependencies.lattice-core]
+path = ".."
+
+[[bin]]
+name = "wal_open"
+path = "fuzz_targets/wal_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sstable_open"
+path = "fuzz_targets/sstable_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "manifest_open"
+path = "fuzz_targets/manifest_open.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+# Empty `[workspace]` makes this an independent package, not a
+# member of the parent Lattice workspace. Without it, the fuzz
+# crate is sucked into the parent workspace and inherits its
+# lints, which conflicts with libfuzzer-sys's compilation model.

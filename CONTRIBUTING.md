@@ -65,6 +65,33 @@ failing on a PR, the PR is the cause unless proven otherwise.
 - Comments are reserved for non-obvious invariants. Self-evident
   code does not need a comment.
 
+## Fuzzing
+
+The `crates/lattice-core/fuzz/` directory holds three
+`cargo-fuzz` targets that exercise the open-time decode paths
+(WAL log, SSTable file, and manifest file) against arbitrary
+bytes. Run them locally with a nightly toolchain:
+
+```bash
+rustup install nightly
+cargo install cargo-fuzz
+cd crates/lattice-core/fuzz
+cargo +nightly fuzz run wal_open
+cargo +nightly fuzz run sstable_open
+cargo +nightly fuzz run manifest_open
+```
+
+CI runs each target for 30 seconds on every PR as an
+informational job (`continue-on-error: true`); a longer
+exhaustive sweep belongs to a separate schedule that
+contributors run before a release.
+
+The contract every fuzz target enforces is "no input causes a
+panic". A malformed file must surface as `Err(Error::*)` from
+`Lattice::open`, never as a process abort or out-of-bounds
+access. New corpus inputs that catch a regression should be
+checked in under `corpus/<target>/`.
+
 ## Code of conduct
 
 Participation is governed by the
