@@ -952,6 +952,57 @@ impl Lattice {
         ScanIter::new(&active_guard, state.frozen.as_deref(), sstables, prefix)
     }
 
+    /// Range-bounded streaming scan. Yields visible
+    /// `(key, value)` pairs whose key falls within
+    /// `[start, end)`, in strictly increasing key order.
+    ///
+    /// `start = None` means "from the beginning of the keyspace";
+    /// `end = None` means "to the end". The bounds are
+    /// inclusive-exclusive to match the common Rust range
+    /// idiom (`a..b`). Tombstones are filtered like
+    /// [`Self::scan_iter`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use lattice_core::Lattice;
+    /// let dir = tempfile::tempdir()?;
+    /// let db = Lattice::open(dir.path())?;
+    /// for c in b'a'..=b'g' {
+    ///     db.put([c], b"v")?;
+    /// }
+    /// // [c, f) yields c, d, e
+    /// let keys: Vec<_> = db
+    ///     .scan_range(Some(b"c"), Some(b"f"))
+    ///     .filter_map(Result::ok)
+    ///     .map(|(k, _)| k)
+    ///     .collect();
+    /// assert_eq!(keys, vec![b"c".to_vec(), b"d".to_vec(), b"e".to_vec()]);
+    /// # Ok::<_, Box<dyn std::error::Error>>(())
+    /// ```
+    #[instrument(
+        level = "debug",
+        skip(self),
+        fields(
+            start_len = start.map_or(0, <[u8]>::len),
+            end_len = end.map_or(0, <[u8]>::len),
+        ),
+    )]
+    pub fn scan_range(&self, start: Option<&[u8]>, end: Option<&[u8]>) -> ScanIter {
+        let active_guard = self.inner.active.read();
+        let state = self.inner.state.read().clone();
+        let sstables: Vec<Arc<SSTableReader>> =
+            state.all_sstables_newest_first().cloned().collect();
+        ScanIter::with_bounds(
+            &active_guard,
+            state.frozen.as_deref(),
+            sstables,
+            None,
+            start,
+            end,
+        )
+    }
+
     /// Flush the current memtable to a new on-disk `SSTable`, then
     /// truncate the WAL. No-op if the memtable is empty.
     #[instrument(level = "info", skip(self))]

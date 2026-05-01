@@ -8,6 +8,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `Lattice::config() -> Config` returns the runtime configuration
+  (flush threshold, compaction threshold, commit window, commit
+  batch). Companion to `Lattice::stats`: stats reports
+  gauge-shaped operational state, config reports the static
+  knobs the engine is running with. Useful for an operator
+  verifying the engine is configured the way they think it is,
+  and for tests that need to assert a builder value actually
+  stuck. The new `pub struct Config` derives Debug, Clone,
+  Copy, PartialEq, Eq.
+- `Lattice::scan_range(start, end) -> ScanIter` is a streaming
+  range-bounded scan. Bounds are inclusive-exclusive
+  (`[start, end)`) to match the `a..b` Rust range idiom;
+  `start = None` means "from the beginning of the keyspace",
+  `end = None` means "to the end". Sits alongside
+  `scan_iter(prefix)` for the two natural scan shapes.
+  `tests/scan_range.rs` contract suite (7 tests) pins the
+  bound semantics, the unbounded sides, the empty-range edge
+  case, the multi-tier merge, and tombstone filtering.
 - `deny.toml` at the workspace root, plus a `cargo deny check`
   job in CI. Audits advisories, licences (explicit allow list),
   duplicate dependencies (warn), wildcard versions (deny), and

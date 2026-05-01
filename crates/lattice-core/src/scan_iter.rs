@@ -107,6 +107,14 @@ pub struct ScanIter {
     sources: Vec<SourceIter>,
     heap: BinaryHeap<Reverse<HeapEntry>>,
     prefix: Option<Vec<u8>>,
+    /// Inclusive lower bound. When `Some(b)`, keys with `k < b`
+    /// are skipped. Stacks with `prefix`: a key must satisfy
+    /// every active filter to be yielded.
+    start_bound: Option<Vec<u8>>,
+    /// Exclusive upper bound. When `Some(b)`, keys with `k >= b`
+    /// terminate the iterator (every later key is also `>= b`,
+    /// so no need to keep walking).
+    end_bound: Option<Vec<u8>>,
     /// Set to `Some(err)` once a source returns an error. The next
     /// `next()` yields the error and the iterator is then exhausted.
     error: Option<crate::error::Error>,
@@ -134,7 +142,25 @@ impl ScanIter {
         sstables_newest_first: Vec<Arc<SSTableReader>>,
         prefix: Option<&[u8]>,
     ) -> Self {
+        Self::with_bounds(active, frozen, sstables_newest_first, prefix, None, None)
+    }
+
+    /// General constructor used by both [`crate::Lattice::scan_iter`]
+    /// (which leaves `start` and `end` `None`) and
+    /// [`crate::Lattice::scan_range`] (which leaves `prefix`
+    /// `None`). The three filters stack: a key must match the
+    /// prefix AND fall within `[start, end)` to be yielded.
+    pub(crate) fn with_bounds(
+        active: &MemTable,
+        frozen: Option<&MemTable>,
+        sstables_newest_first: Vec<Arc<SSTableReader>>,
+        prefix: Option<&[u8]>,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+    ) -> Self {
         let prefix_owned = prefix.map(<[u8]>::to_vec);
+        let start_owned = start.map(<[u8]>::to_vec);
+        let end_owned = end.map(<[u8]>::to_vec);
         let mut sources: Vec<SourceIter> = Vec::with_capacity(2 + sstables_newest_first.len());
 
         sources.push(Box::new(memtable_source(active, prefix)));
@@ -170,6 +196,8 @@ impl ScanIter {
             sources,
             heap,
             prefix: prefix_owned,
+            start_bound: start_owned,
+            end_bound: end_owned,
             error,
         }
     }
@@ -225,6 +253,26 @@ impl Iterator for ScanIter {
                 && !winner.key.starts_with(p.as_slice())
             {
                 continue;
+            }
+
+            // Honour the start bound: skip keys strictly less than
+            // it. Per-key check rather than seek-skip so the
+            // implementation stays simple; the merge frontier is
+            // bounded already so the cost is per-yield.
+            if let Some(start) = &self.start_bound
+                && winner.key.as_slice() < start.as_slice()
+            {
+                continue;
+            }
+
+            // Honour the end bound: when a key is >= the bound,
+            // every later key in the merge is also >= it (keys come
+            // out in increasing order), so terminate the iterator.
+            if let Some(end) = &self.end_bound
+                && winner.key.as_slice() >= end.as_slice()
+            {
+                self.heap.clear();
+                return None;
             }
 
             // Tombstones drop out of the public iterator.
