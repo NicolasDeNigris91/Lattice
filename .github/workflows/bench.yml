@@ -1,0 +1,111 @@
+name: bench
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "benches/**"
+      - "crates/**/Cargo.toml"
+      - "crates/lattice-core/src/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - ".github/workflows/bench.yml"
+  workflow_dispatch:
+
+# Cancel in-flight runs on the same branch when a new push lands. The
+# bench cost is non-trivial, and the only meaningful baseline is the
+# tip of the branch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bencher:
+    name: bencher.dev (continuous benchmarking)
+    runs-on: ubuntu-latest
+    # The job is gated on the `BENCHER_API_TOKEN` repository secret.
+    # When the secret is absent (forks, PRs from forks, or before the
+    # project is set up at bencher.dev) the job exits early with a log
+    # message and reports success, so external contributors do not see
+    # a red required check on their PR.
+    permissions:
+      checks: write
+      pull-requests: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Bencher needs at least the most recent commit on the base
+          # branch to compute deltas; full history is the simplest
+          # configuration.
+          fetch-depth: 0
+
+      - id: token
+        name: Check for BENCHER_API_TOKEN
+        env:
+          TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::BENCHER_API_TOKEN secret not set; skipping continuous benchmarking. See .github/workflows/bench.yml for setup instructions."
+          fi
+
+      - if: steps.token.outputs.present == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - if: steps.token.outputs.present == 'true'
+        uses: Swatinem/rust-cache@v2
+
+      - if: steps.token.outputs.present == 'true'
+        uses: bencherdev/bencher@main
+
+      # `bencher run --adapter rust_criterion` parses Criterion's
+      # output and uploads it to the bencher.dev project. The server
+      # tracks a rolling baseline per `(branch, testbed, benchmark)`
+      # and runs a Welch's t-test at the configured threshold (set on
+      # the bencher.dev project page; default upper-bound is 0.95
+      # significance with a 2-sigma cutoff). Criterion's own
+      # measurement noise on a shared GitHub runner is non-trivial,
+      # so the t-test gate is what keeps the alerts honest.
+      #
+      # `--err` flips a regression-alerted run into a non-zero exit,
+      # which fails the job and surfaces the alert as a required-check
+      # failure on the PR. PR runs target the `pr` branch (auto-created
+      # by bencher when first seen) so the comparison is against the
+      # base branch of the PR, not against `main`.
+      - name: Run benchmarks via bencher (push to main)
+        if: steps.token.outputs.present == 'true' && github.event_name == 'push'
+        env:
+          BENCHER_API_TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
+        run: |
+          bencher run \
+            --project lattice \
+            --branch main \
+            --testbed ubuntu-latest \
+            --adapter rust_criterion \
+            --err \
+            "cargo bench -p lattice-core"
+
+      - name: Run benchmarks via bencher (pull request)
+        if: steps.token.outputs.present == 'true' && github.event_name == 'pull_request'
+        env:
+          BENCHER_API_TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bencher run \
+            --project lattice \
+            --branch "$GITHUB_HEAD_REF" \
+            --branch-start-point "$GITHUB_BASE_REF" \
+            --branch-start-point-hash "${{ github.event.pull_request.base.sha }}" \
+            --branch-reset \
+            --testbed ubuntu-latest \
+            --adapter rust_criterion \
+            --github-actions "$GITHUB_TOKEN" \
+            --err \
+            "cargo bench -p lattice-core"

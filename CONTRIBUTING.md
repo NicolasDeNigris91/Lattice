@@ -114,6 +114,35 @@ fuzz harnesses are excluded; so are `Debug` and `Display` impls
 where a mutation would not change observable behaviour outside
 the formatter.
 
+## Continuous benchmarking
+
+Every push to `main` and every pull request runs the criterion
+suite under [bencher.dev](https://bencher.dev), which tracks a
+rolling baseline per `(branch, testbed, benchmark)` and
+runs Welch's t-test against the configured threshold. A
+regression alert fails the bench job; that surfaces as a red
+required check on the PR with a comment from the bencher GitHub
+App pointing at the offending benchmark and the magnitude of the
+slowdown.
+
+The job is gated on the `BENCHER_API_TOKEN` repository secret.
+Forks and PRs from forks do not have access to the secret, so
+the job exits early with a notice and reports success; no red
+required check on contributor PRs. The bencher.dev project for
+this repository is `lattice`; see
+[`.github/workflows/bench.yml`](.github/workflows/bench.yml) for
+the wiring.
+
+Running the suite locally to compare against a baseline:
+
+```bash
+cargo bench -p lattice-core
+```
+
+Reports land at `target/criterion/report/index.html`. The
+bencher.dev dashboard is the long-form record; local criterion
+output is the per-commit detail.
+
 ## Code of conduct
 
 Participation is governed by the

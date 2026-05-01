@@ -8,6 +8,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `.github/workflows/bench.yml` wires continuous benchmarking
+  through [bencher.dev](https://bencher.dev). Every push to
+  `main` and every pull request runs the criterion suite, uploads
+  the results to the `lattice` project, and runs Welch's t-test
+  against the rolling baseline at the configured threshold. A
+  regression alert fails the job and the bencher GitHub App
+  posts a per-PR comment naming the benchmark and the magnitude
+  of the slowdown. Statistical significance is the gate, not raw
+  delta, so noise on the shared GitHub runner does not produce
+  false positives. The job is gated on `BENCHER_API_TOKEN`: forks
+  and PRs from forks skip silently with an informational notice
+  rather than failing on a missing secret. CONTRIBUTING.md gains
+  a "Continuous benchmarking" section that documents the
+  workflow.
 - `deny.toml` at the workspace root, plus a `cargo deny check`
   job in CI. Audits advisories, licences (explicit allow list),
   duplicate dependencies (warn), wildcard versions (deny), and
