@@ -10,6 +10,7 @@
 - [Bloom filters](04-bloom.md)
 - [Compaction](05-compaction.md)
 - [Snapshots](06-snapshots.md)
+- [Streaming scan iterator](16-scan-iter.md)
 
 # Measurement
 

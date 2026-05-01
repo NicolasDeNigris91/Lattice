@@ -335,4 +335,42 @@ proptest! {
             );
         }
     }
+
+    /// `scan_iter` is the streaming variant of `scan`. The two must
+    /// be observationally equivalent under any history of puts,
+    /// deletes, flushes, and compactions: same set of visible
+    /// pairs, same key order, same tombstone filtering. The test
+    /// drives a random op sequence and asserts both APIs return the
+    /// identical `Vec<(key, value)>`. This pins the v1.12 streaming
+    /// scan as a behavioural drop-in for callers that want lazy
+    /// iteration without changing their result-handling code.
+    #[test]
+    fn scan_iter_matches_scan_under_random_history(
+        ops in proptest::collection::vec(arb_op(), 0..150),
+    ) {
+        let dir = tempdir().unwrap();
+        let db = Lattice::open(dir.path()).unwrap();
+
+        let mut reference: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        let mut all_keys: BTreeSet<Vec<u8>> = BTreeSet::new();
+        replay(&db, &ops, &mut reference, &mut all_keys);
+
+        let from_scan = db.scan(None).unwrap();
+        let from_iter: Vec<(Vec<u8>, Vec<u8>)> = db
+            .scan_iter(None)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        prop_assert_eq!(&from_iter, &from_scan,
+            "scan_iter must yield the same pairs as scan");
+
+        // And the result must match the reference's view of live
+        // keys (no extras, no missing entries, value matches).
+        let from_reference: Vec<(Vec<u8>, Vec<u8>)> = reference
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        prop_assert_eq!(from_iter, from_reference,
+            "scan_iter must agree with the BTreeMap reference");
+    }
 }

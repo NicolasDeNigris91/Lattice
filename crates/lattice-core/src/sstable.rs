@@ -323,6 +323,26 @@ impl SSTableReader {
         Ok(SsLookup::Absent)
     }
 
+    /// Number of compressed blocks in this `SSTable`. Used by the
+    /// streaming scan iterator to walk blocks one at a time without
+    /// materialising the whole table into memory.
+    pub(crate) fn block_count(&self) -> usize {
+        self.index.len()
+    }
+
+    /// Read the compressed block at `idx`, decompress it, and parse
+    /// the entries in order. Used by the streaming scan iterator;
+    /// production reads through `get` go through `candidate_block`
+    /// and read at most one block per lookup.
+    pub(crate) fn block_entries_at(&self, idx: usize) -> Result<Vec<Entry>> {
+        let entry = self
+            .index
+            .get(idx)
+            .ok_or(Error::MalformedFormat("block index out of range"))?;
+        let block = self.read_block(entry)?;
+        parse_block(&block)
+    }
+
     /// Iterate every entry (including tombstones) in key order, skipping
     /// any whose key does not start with `prefix` if given. Returns
     /// owned `(key, optional value)` pairs.

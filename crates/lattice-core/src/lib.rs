@@ -26,6 +26,7 @@ mod error;
 mod manifest;
 mod memtable;
 mod metrics_compat;
+mod scan_iter;
 mod snapshot;
 mod sstable;
 mod transaction;
@@ -34,7 +35,7 @@ mod wal;
 #[cfg(feature = "tokio")]
 pub use crate::async_api::AsyncLattice;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -50,6 +51,7 @@ use crate::conflict_tracker::ConflictTracker;
 pub use crate::error::{Error, Result};
 use crate::manifest::Manifest;
 use crate::memtable::{Lookup, MemTable};
+pub use crate::scan_iter::ScanIter;
 pub use crate::snapshot::Snapshot;
 use crate::sstable::{SSTableReader, SSTableWriter, SsLookup};
 pub use crate::transaction::Transaction;
@@ -632,40 +634,55 @@ impl Lattice {
     }
 
     /// Iterate live key-value pairs in key order. If `prefix` is
-    /// `Some`, only keys starting with it are returned.
+    /// `Some`, only keys starting with it are returned. Returns the
+    /// full result as a `Vec`; callers that prefer to walk the
+    /// keyspace one entry at a time should use [`Self::scan_iter`].
     #[instrument(level = "debug", skip(self), fields(prefix_len = prefix.map_or(0, <[u8]>::len)))]
     pub fn scan(&self, prefix: Option<&[u8]>) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let mut accumulator: BTreeMap<Vec<u8>, Option<Vec<u8>>> = BTreeMap::new();
+        self.scan_iter(prefix).collect()
+    }
 
-        for (key, value) in self.inner.active.read().iter_all() {
-            if prefix.is_some_and(|p| !key.starts_with(p)) {
-                continue;
-            }
-            accumulator.insert(key.to_vec(), value.map(<[u8]>::to_vec));
-        }
-
+    /// Streaming variant of [`Self::scan`]. Returns an iterator that
+    /// merges the active memtable, the frozen memtable, and every
+    /// `SSTable` on disk through a k-way heap merge, yielding live
+    /// `(key, value)` pairs in strictly increasing key order. The
+    /// engine holds only the merge frontier (one entry per source)
+    /// plus one decoded block per `SSTable` source, so memory is
+    /// independent of the total number of keys in the database.
+    ///
+    /// `prefix` filters the keyspace at every source, so a tightly
+    /// scoped scan reads only the blocks whose keys can match.
+    ///
+    /// Errors from block reads or parse failures surface as
+    /// `Some(Err(...))` items; callers can choose to abort or
+    /// continue.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use lattice_core::Lattice;
+    ///
+    /// let dir = tempfile::tempdir()?;
+    /// let db = Lattice::open(dir.path())?;
+    /// db.put(b"a", b"1")?;
+    /// db.put(b"b", b"2")?;
+    /// db.put(b"c", b"3")?;
+    ///
+    /// let mut keys = Vec::new();
+    /// for entry in db.scan_iter(None) {
+    ///     let (k, _) = entry?;
+    ///     keys.push(k);
+    /// }
+    /// assert_eq!(keys, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+    /// # Ok::<_, Box<dyn std::error::Error>>(())
+    /// ```
+    #[instrument(level = "debug", skip(self), fields(prefix_len = prefix.map_or(0, <[u8]>::len)))]
+    pub fn scan_iter(&self, prefix: Option<&[u8]>) -> ScanIter {
+        let active_guard = self.inner.active.read();
         let state = self.inner.state.read().clone();
-        if let Some(frozen) = &state.frozen {
-            for (key, value) in frozen.iter_all() {
-                if prefix.is_some_and(|p| !key.starts_with(p)) {
-                    continue;
-                }
-                accumulator
-                    .entry(key.to_vec())
-                    .or_insert_with(|| value.map(<[u8]>::to_vec));
-            }
-        }
-
-        for sst in state.all_sstables_newest_first() {
-            for (key, value) in sst.iter_all(prefix)? {
-                accumulator.entry(key).or_insert(value);
-            }
-        }
-
-        Ok(accumulator
-            .into_iter()
-            .filter_map(|(k, v)| v.map(|val| (k, val)))
-            .collect())
+        let sstables: Vec<Arc<SSTableReader>> =
+            state.all_sstables_newest_first().cloned().collect();
+        ScanIter::new(&active_guard, state.frozen.as_deref(), sstables, prefix)
     }
 
     /// Flush the current memtable to a new on-disk `SSTable`, then
