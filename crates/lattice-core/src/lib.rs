@@ -13,6 +13,7 @@
 mod async_api;
 mod bloom;
 mod compaction;
+mod compactor;
 // `conflict_tracker` is internal to the engine, but the `loom` test
 // crate needs cross-crate access to drive its model checks. The
 // `cfg(loom)` build flips the visibility to `pub`; default builds
@@ -47,6 +48,8 @@ use std::time::{Duration, Instant};
 use parking_lot::{Mutex, RwLock};
 use tracing::{info, instrument, warn};
 
+pub use crate::compactor::CompactionHandle;
+use crate::compactor::CompactorShared;
 use crate::conflict_tracker::ConflictTracker;
 pub use crate::error::{Error, Result};
 use crate::manifest::Manifest;
@@ -232,17 +235,31 @@ struct Inner {
     /// behind a `Mutex<Option<_>>` so it can be installed after the
     /// `Arc<Inner>` exists.
     flusher_join: Mutex<Option<JoinHandle<()>>>,
+    /// Shared state for the non-blocking compaction worker added in
+    /// v1.13. `Lattice::compact_async` schedules a round here; the
+    /// worker holds a `Weak<Inner>` and exits when the last strong
+    /// `Arc` drops or when `shutdown` is set in `Drop`.
+    compactor: Arc<CompactorShared>,
+    /// Join handle for the background compactor; taken on Drop.
+    compactor_join: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Drop for Inner {
-    /// Last-handle close. Stop the background flusher, then flush
-    /// any pending non-durable WAL bytes so well-behaved programs
-    /// do not lose acknowledged writes. Errors are logged because
-    /// Drop cannot return them.
+    /// Last-handle close. Stop the background flusher and the
+    /// background compactor, then flush any pending non-durable
+    /// WAL bytes so well-behaved programs do not lose
+    /// acknowledged writes. Errors are logged because Drop cannot
+    /// return them.
     fn drop(&mut self) {
         self.flusher_stop.store(true, Ordering::Release);
         if let Some(join) = self.flusher_join.get_mut().take() {
             join.thread().unpark();
+            let _ = join.join();
+        }
+        // Tell the compactor to exit at its next loop boundary,
+        // wake it from any in-flight wait, and join.
+        self.compactor.shutdown();
+        if let Some(join) = self.compactor_join.get_mut().take() {
             let _ = join.join();
         }
         if self.pending_writes.load(Ordering::Acquire) > 0
@@ -253,6 +270,32 @@ impl Drop for Inner {
                 "lattice drop: flush_wal failed; non-durable writes may be lost"
             );
         }
+    }
+}
+
+/// Background compactor loop body. Holds `CompactorShared` so it
+/// can wait on the condvar without pinning `Inner` alive; the
+/// `Weak<Inner>` is upgraded only while a round is in flight.
+///
+/// Exits when:
+/// - `CompactorShared::shutdown()` is called (by `Inner::Drop`).
+/// - The last `Arc<Inner>` drops between rounds, so the upgrade
+///   inside the loop returns `None`.
+#[allow(clippy::needless_pass_by_value)]
+fn compactor_loop(weak: Weak<Inner>, shared: Arc<CompactorShared>) {
+    while let Some(target) = shared.next_request() {
+        let Some(inner) = weak.upgrade() else { break };
+        // Wrap the inner in a temporary Lattice so we can reuse the
+        // existing public-facing compaction loop. The wrapper bumps
+        // the strong count for the duration of the round; we drop
+        // it before going back to wait so `Inner::Drop` can fire.
+        let lattice = Lattice {
+            inner: Arc::clone(&inner),
+        };
+        let result = lattice.run_pending_compactions();
+        shared.finish(target, result);
+        drop(lattice);
+        drop(inner);
     }
 }
 
@@ -464,6 +507,8 @@ impl Lattice {
             commit_batch,
             flusher_stop: AtomicBool::new(false),
             flusher_join: Mutex::new(None),
+            compactor: Arc::new(CompactorShared::new()),
+            compactor_join: Mutex::new(None),
         });
 
         // Spawn the background flusher. It holds a `Weak<Inner>` so
@@ -476,6 +521,20 @@ impl Lattice {
             .spawn(move || flusher_loop(weak, commit_window))
             .expect("spawn lattice-flusher thread");
         *inner.flusher_join.lock() = Some(join);
+
+        // Spawn the background compactor. The worker holds the
+        // compactor's shared state directly (so it can wait on the
+        // condvar without keeping `Inner` alive) plus a `Weak<Inner>`
+        // it upgrades only while a round is actually in flight. Exits
+        // on `compactor.shutdown()` (set by `Inner::Drop`) or when
+        // the last strong `Arc<Inner>` goes away.
+        let weak = Arc::downgrade(&inner);
+        let compactor_state = Arc::clone(&inner.compactor);
+        let join = thread::Builder::new()
+            .name("lattice-compactor".into())
+            .spawn(move || compactor_loop(weak, compactor_state))
+            .expect("spawn lattice-compactor thread");
+        *inner.compactor_join.lock() = Some(join);
 
         Ok(Self { inner })
     }
@@ -769,20 +828,64 @@ impl Lattice {
     }
 
     /// Run leveled compaction until no level holds more than one
-    /// `SSTable`. Each round picks the shallowest level above the
-    /// per-level threshold (or any level above two tables, when the
-    /// caller forces a full compaction), merges every table in that
-    /// level into a single output, and pushes the output to the
-    /// next level down.
+    /// `SSTable`. Synchronous wrapper around [`Self::compact_async`]
+    /// that blocks the caller until the background worker reports
+    /// completion.
     ///
-    /// Behaviour mirrors v1.0..v1.2's "merge everything" semantics
-    /// from the user's point of view: after `compact()` the database
-    /// has at most one `SSTable` per non-empty level. Internally the
-    /// algorithm only rewrites one level's bytes per round, so write
-    /// amplification scales with the number of levels (~`log_T(N)`)
-    /// rather than the total dataset size.
+    /// Each round picks the shallowest level above the per-level
+    /// threshold (or any level above two tables, when the caller
+    /// forces a full compaction), merges every table in that level
+    /// into a single output, and pushes the output to the next
+    /// level down. After `compact()` the database has at most one
+    /// `SSTable` per non-empty level.
+    ///
+    /// Internally the algorithm only rewrites one level's bytes per
+    /// round, so write amplification scales with the number of
+    /// levels (~`log_T(N)`) rather than the total dataset size.
     #[instrument(level = "info", skip(self))]
     pub fn compact(&self) -> Result<()> {
+        self.compact_async().wait()
+    }
+
+    /// Schedule a leveled-compaction round to run on the background
+    /// compactor thread and return immediately. The returned
+    /// [`CompactionHandle`] can be `wait()`-ed on to observe the
+    /// outcome, or dropped (the round still runs and any error
+    /// surfaces on the next compact call).
+    ///
+    /// Multiple concurrent calls coalesce: the worker captures the
+    /// latest scheduled generation when it wakes and runs as many
+    /// rounds as the level layout requires before publishing the
+    /// captured generation as completed. Every caller whose
+    /// handle's generation is no greater than the captured value
+    /// sees `wait()` return.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use lattice_core::Lattice;
+    /// let dir = tempfile::tempdir()?;
+    /// let db = Lattice::open(dir.path())?;
+    /// let handle = db.compact_async();
+    /// // ... do other work; the round is in flight ...
+    /// handle.wait()?;
+    /// # Ok::<_, Box<dyn std::error::Error>>(())
+    /// ```
+    #[instrument(level = "info", skip(self))]
+    pub fn compact_async(&self) -> CompactionHandle {
+        let target = self.inner.compactor.schedule();
+        CompactionHandle {
+            shared: Arc::clone(&self.inner.compactor),
+            target_generation: target,
+        }
+    }
+
+    /// Body of the compaction loop run by the background worker.
+    /// Same algorithm as the pre-v1.13 synchronous `compact()`:
+    /// pick the shallowest level with at least two tables and
+    /// compact it down, repeat until every level holds at most one
+    /// table.
+    fn run_pending_compactions(&self) -> Result<()> {
         loop {
             let target = {
                 let state = self.inner.state.read();
@@ -1046,10 +1149,21 @@ impl Lattice {
 
     fn maybe_compact(&self) -> Result<()> {
         // Auto-compaction picks the shallowest level above the
-        // per-level threshold and runs one round. Cascading happens
-        // gradually: each subsequent flush re-checks and runs the
-        // next round if the cascade overflowed. This keeps the
-        // writer's worst-case latency bounded by a single round.
+        // per-level threshold and runs one round inline on the
+        // writer's thread. Cascading happens gradually: each
+        // subsequent flush re-checks and runs the next round if
+        // the cascade overflowed. This keeps the writer's
+        // worst-case latency bounded by a single round.
+        //
+        // Pre-v1.13 the user-facing `compact()` did the same; v1.13
+        // adds [`Self::compact_async`] for callers that want
+        // non-blocking compaction. Auto-compaction stays inline so
+        // a fresh `Lattice::open` followed by `flush` leaves the
+        // database in a deterministically settled state, which the
+        // existing integration tests (and many user reopens) rely
+        // on. Callers running heavy write workloads can disable
+        // implicit auto-compaction (a v2.x feature) and drive
+        // `compact_async` from their own scheduler.
         let target = {
             let state = self.inner.state.read();
             state

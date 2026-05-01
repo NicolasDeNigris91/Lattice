@@ -8,6 +8,40 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `Lattice::compact_async() -> CompactionHandle`. Schedules a
+  leveled-compaction round on a dedicated background thread
+  spawned at `Lattice::open` time, and returns the handle
+  immediately. `CompactionHandle::wait()` blocks until the
+  worker reports completion, returning any sticky error from a
+  failed round. Multiple in-flight calls coalesce: the worker
+  captures the latest scheduled generation when it wakes, runs
+  every round the level layout requires, then publishes the
+  captured generation as completed. Every caller whose handle's
+  generation is no greater than the captured value sees
+  `wait()` return.
+- `Lattice::compact()` is now a one-line wrapper around
+  `compact_async().wait()`. The existing synchronous behaviour
+  is preserved (the call still blocks until the round
+  completes); the change is that the I/O now runs on the worker
+  thread instead of the caller's thread.
+- `Error::Compaction(String)` variant carries the formatted
+  message of a failed background round. Sticky: every pending
+  `wait()` returns the cloned error; the next successful round
+  clears the slot.
+- `crates/lattice-core/src/compactor.rs` houses the worker's
+  shared state machine (`CompactorShared` with `requested` and
+  `completed` generation counters, a `parking_lot::Condvar`,
+  and a `last_error` slot). The state machine is gated behind
+  `cfg(loom)` shadows of `std::sync` so a follow-up loom test
+  in `lattice-loom-tests` can drive the schedule -> next_request
+  -> finish -> wait_for cycle under every interleaving.
+- `crates/lattice-core/tests/compact_async.rs` integration suite
+  (5 tests) pinning the contract: `compact_async` returns within
+  50 ms regardless of round wall-clock cost, `wait()` matches
+  the synchronous compact's per-level layout, multiple
+  concurrent calls coalesce, the writer thread makes progress
+  during a background round, and dropping the handle (or the
+  whole `Lattice`) mid-round is clean.
 - `deny.toml` at the workspace root, plus a `cargo deny check`
   job in CI. Audits advisories, licences (explicit allow list),
   duplicate dependencies (warn), wildcard versions (deny), and

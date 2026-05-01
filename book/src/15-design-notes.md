@@ -13,70 +13,29 @@ SkipMap memtable are local refactors; encryption at rest reaches
 across the WAL, the SSTable format, and the manifest, so it
 ships last and probably bumps the on-disk format version.
 
-## 1. Non-blocking compaction (`compact_async`)
+## 1. Non-blocking compaction follow-ups
 
-### Problem
+The user-facing `compact_async()` API and the dedicated worker
+thread that backs it are no longer a v2.x design item; the
+shape and semantics now live in chapter 5 ("Non-blocking
+compaction"). Three open questions remain for a future release:
 
-Today `Lattice::compact()` runs on the caller's thread. The
-caller blocks until the merge produces a new SSTable, the
-manifest is rewritten, and orphans are deleted. Auto-compaction
-at flush time runs in the same path, so a flush that crosses a
-level threshold pays the compaction cost on the writer's wall
-clock. The latency tail of `put` is therefore bounded below by
-the worst-case compaction round, not by the worst-case
-WAL append.
-
-For a 32 MiB level-2 merge on a slow disk this can be hundreds
-of milliseconds; long enough to show up as a multimodal latency
-distribution in any realistic workload.
-
-### Proposal
-
-Introduce `compact_async()` that returns immediately and runs
-the merge on a dedicated background thread. The existing
-`compact()` becomes `compact_async().wait()`, preserving the
-synchronous API for callers that need it. Auto-compaction at
-flush time delegates to `compact_async` and does not block the
-writer.
-
-The background thread is one per `Lattice` handle (similar to
-the existing flusher), spawned at `open` time, holds a
-`Weak<Inner>`, parks on a condvar, wakes when a flush bumps a
-level past its threshold, runs one compaction round, and parks
-again. On the last `Arc<Inner>` drop the thread exits cleanly
-via the same `Weak::upgrade` -> `None` pattern the flusher
-already uses.
-
-### Trade-offs
-
-- **Latency**: writer-thread tail collapses to the WAL-append
-  cost. Big win.
-- **Throughput**: per-CPU throughput is roughly unchanged; the
-  total work is the same, but on a multi-core host the
-  compaction does not stall the writer.
-- **Memory**: one extra thread plus the in-flight merge buffers
-  (~level-size bytes). Bounded.
-- **Failure mode**: a failed compaction (disk full, corrupt
-  block) currently surfaces synchronously to the caller. With
-  `compact_async`, the failure is logged and stored on `Inner`
-  in a `last_compaction_error: Mutex<Option<Error>>`. The next
-  call to `compact()` (or `compact_async().wait()`) returns it
-  and clears the slot. This matches the way the background
-  flusher handles errors today.
-- **API change**: `compact()` keeps its synchronous shape, so
-  no breaking change.
-
-### Open questions
-
+- **Auto-compaction migration.** Today's auto-compaction at
+  flush time stays inline (the writer still pays the cost when
+  a level crosses its threshold). Moving auto-compaction to
+  `compact_async` is the next step, but it makes the
+  post-flush state non-deterministic and requires updating the
+  existing test fence to wait for convergence rather than
+  assert on it. Tracked as a v2.x candidate.
 - **Backpressure**: if compaction falls behind the flush rate
   forever, levels grow unbounded. Today compaction is
   synchronous so the writer naturally backpressures itself.
-  With `compact_async`, we need either a queue depth limit
+  With async auto-compaction we need either a queue depth limit
   (compaction "owes" stays bounded by a fixed-size channel) or
   a write-side stall when level depth crosses a high-water
-  mark. The latter matches RocksDB's behaviour and is
-  probably the right call. The threshold needs to be a
-  builder option, not a hard-coded constant.
+  mark. The latter matches RocksDB's behaviour and is probably
+  the right call. The threshold needs to be a builder option,
+  not a hard-coded constant.
 - **Cancellation**: should `compact()` (the sync wrapper) be
   cancellable? The simplest answer is no: callers that want
   fire-and-forget use `compact_async`; callers that want a
@@ -85,7 +44,8 @@ already uses.
 - **Loom coverage**: the new thread plus condvar plus Mutex
   state machine needs a loom test exercising the
   flush -> compaction-trigger -> compaction-completion ->
-  manifest-install path.
+  manifest-install path. Pending; the existing
+  `lattice-loom-tests` infrastructure is in place.
 
 ## 2. SkipMap memtable
 

@@ -214,3 +214,41 @@ algorithm and the read path stay simple while the write
 amplification ceiling drops by orders of magnitude.
 
 [compaction]: https://github.com/NicolasDeNigris91/Lattice/blob/main/crates/lattice-core/src/compaction.rs
+
+Non-blocking compaction (v1.13)
+-------------------------------
+
+Through v1.12 every compaction round ran on the caller's thread.
+`Lattice::compact()` blocked until the merge produced a new
+`SSTable`, the manifest was rewritten, and the orphan unlinks
+finished. v1.13 hoists the round onto a dedicated background
+thread, spawned at `Lattice::open` time and joined when the
+last `Arc<Inner>` drops.
+
+`Lattice::compact_async()` schedules a round and returns
+immediately; the returned `CompactionHandle::wait()` blocks the
+caller on the same `parking_lot::Condvar` the worker notifies
+when the round publishes its `completed_generation`. Multiple
+in-flight calls coalesce: the worker captures the latest
+generation when it wakes, runs as many rounds as the level
+layout requires, then publishes that captured generation as
+completed. Every caller whose handle is no greater than the
+captured value sees `wait()` return.
+
+The synchronous `compact()` is now a one-line wrapper around
+`compact_async().wait()`, so callers that need the blocking
+shape pay nothing extra (one extra channel hop) but get the
+same result. Auto-compaction at flush time stays inline; the
+existing test fence relies on a deterministically settled state
+after flush, and the win for fire-and-forget callers (a
+streaming bulk-load that calls `compact_async` periodically and
+never `wait()`s) is the new public API. A v2.x option to also
+make auto-compaction async is documented in chapter 15.
+
+Errors are sticky: a failed round records its message in
+`CompactorShared::last_error`; every pending `wait()` returns
+the cloned `Error::Compaction(...)`; the next successful round
+clears the slot. Sticky errors mean a single transient I/O
+failure surfaces to the next caller instead of disappearing
+into a worker thread, which matches the long-standing
+behaviour of the foreground path.

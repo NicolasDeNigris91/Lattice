@@ -35,4 +35,13 @@ pub enum Error {
     /// recovery path.
     #[error("transaction conflict: a key in the read or write set changed since snapshot")]
     TransactionConflict,
+
+    /// A background compaction round failed and the failure has
+    /// not yet been cleared by a subsequent successful round.
+    /// Carries the formatted message of the original error so
+    /// the type stays `Clone`-friendly (the compactor's state
+    /// machine surfaces the same error to every waiter on the
+    /// failed generation).
+    #[error("compaction failed: {0}")]
+    Compaction(String),
 }
