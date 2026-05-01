@@ -92,6 +92,28 @@ panic". A malformed file must surface as `Err(Error::*)` from
 access. New corpus inputs that catch a regression should be
 checked in under `corpus/<target>/`.
 
+## Mutation testing
+
+A weekly `cargo-mutants` sweep runs on Sundays at 03:00 UTC and
+uploads the `mutants.out/` directory as a build artifact (30
+day retention). The sweep is informational, not gating: a real
+codebase always has surviving mutants, and the value is the
+trend over time. Each survivor is either a test that does not
+actually exercise the surrounding behaviour or a code path that
+genuinely has no observable effect.
+
+Run locally with:
+
+```bash
+cargo install cargo-mutants
+cargo mutants --workspace --no-shuffle
+```
+
+Configuration lives in `.cargo/mutants.toml`. Test, bench, and
+fuzz harnesses are excluded; so are `Debug` and `Display` impls
+where a mutation would not change observable behaviour outside
+the formatter.
+
 ## Code of conduct
 
 Participation is governed by the

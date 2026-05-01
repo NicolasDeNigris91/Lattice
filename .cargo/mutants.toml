@@ -1,0 +1,27 @@
+# Configuration for cargo-mutants. Excludes paths and patterns
+# whose mutation counts would dominate the report without telling
+# us anything about correctness.
+
+# Skip the test, bench, and fuzz harnesses themselves: a mutation
+# inside a test that the test no longer catches is a recursive
+# definition, not a finding about the engine.
+exclude_globs = [
+    "crates/lattice-core/tests/**",
+    "crates/lattice-core/fuzz/**",
+    "benches/**",
+]
+
+# Skip impls that are display- or layout-only and whose mutations
+# would not change observable behaviour outside the formatter.
+exclude_re = [
+    "impl .*::fmt::Debug for",
+    "impl .*::fmt::Display for",
+]
+
+# Time budget per mutant. Mutants that hang are reported as
+# `Timeout` rather than mistakenly counted as `Caught`.
+timeout = 120
+
+# Run mutants in deterministic order so reports diff cleanly
+# between runs.
+shuffle = false

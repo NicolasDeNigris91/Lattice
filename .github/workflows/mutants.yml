@@ -1,0 +1,40 @@
+name: mutants
+
+on:
+  schedule:
+    # Sunday 03:00 UTC. Off-hours so a weekly sweep does not
+    # collide with a Monday morning PR queue.
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mutants:
+    name: cargo-mutants weekly sweep
+    runs-on: ubuntu-latest
+    # cargo-mutants on the full workspace can take an hour or two
+    # for a project this size. The 6-hour ceiling matches GitHub's
+    # default job timeout so we do not silently truncate.
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      # Informational only. A weekly mutation sweep on a real
+      # codebase always reports survivors; the goal is the trend
+      # over time, not a green run on day one.
+      - name: Run mutation sweep
+        continue-on-error: true
+        run: cargo mutants --workspace --no-shuffle
+      - name: Upload mutants.out artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-out
+          path: mutants.out/
+          retention-days: 30

@@ -58,6 +58,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   per Pages convention (the latest commit wins). Requires
   "Source: GitHub Actions" in the repository's Pages settings
   before the first deploy.
+- Weekly `cargo-mutants` sweep workflow at
+  `.github/workflows/mutants.yml`. Runs Sunday 03:00 UTC and
+  uploads `mutants.out/` as a 30-day artifact. Informational
+  only: surviving mutants are normal on a real codebase, and
+  the value is the trend over time. Configuration lives in
+  `.cargo/mutants.toml` and excludes test, bench, and fuzz
+  harnesses, plus `Debug` / `Display` impls. Local-run recipe
+  is documented in `CONTRIBUTING.md`.
 - Compile-checked doctests on the three highest-traffic public
   items: the `Lattice` struct (overview example with a cloned
   handle reading from a spawned thread), `Lattice::open` (open,
