@@ -1,11 +1,104 @@
-//! Lattice, an LSM-tree key-value storage engine.
+//! Lattice: an embeddable LSM-tree key-value storage engine.
 //!
-//! This crate exposes a small embeddable key-value store backed by a write
-//! ahead log, an in-memory memtable, sorted string tables, bloom filters,
-//! tiered compaction, and snapshots.
+//! Lattice is a small, single-process, ordered byte-key
+//! byte-value store built from scratch in safe Rust. It is
+//! designed for learning and as a portfolio piece, but it is
+//! tested as if it were a production system: 90+ unit and
+//! integration tests, a four-pillar property fence
+//! (replay-on-reopen, snapshot isolation, compaction
+//! equivalence, transactional rollback), three cargo-fuzz
+//! targets against the on-disk decoders, and a `loom` model
+//! checker that drives the conflict tracker and the background
+//! compactor under every legal interleaving.
 //!
-//! See the companion book at <https://lattice.nicolaspilegidenigris.dev>
-//! for a chapter-by-chapter explanation of every component.
+//! ## Quick start
+//!
+//! ```
+//! use lattice_core::Lattice;
+//!
+//! let dir = tempfile::tempdir()?;
+//! let db = Lattice::open(dir.path())?;
+//!
+//! db.put(b"alpha", b"first")?;
+//! db.put(b"bravo", b"second")?;
+//! assert_eq!(db.get(b"alpha")?.as_deref(), Some(b"first".as_slice()));
+//! # Ok::<_, Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! See the [`examples`](https://github.com/NicolasDeNigris91/Lattice/tree/main/crates/lattice-core/examples)
+//! directory for runnable programs covering the basic key-value
+//! API, snapshot-isolated transactions, point-in-time
+//! snapshots, the streaming scan iterator, and non-blocking
+//! background compaction.
+//!
+//! ## Architecture
+//!
+//! At the storage layer Lattice composes:
+//!
+//! - A **write-ahead log** (`wal`) that every mutation hits
+//!   first, with optional per-write durability via
+//!   [`WriteOptions`].
+//! - An in-memory **memtable** (`memtable`) — a `BTreeMap`
+//!   behind a `parking_lot::RwLock`.
+//! - On-disk **sorted string tables** (`sstable`) with a sparse
+//!   index, LZ4-compressed blocks, and a per-table bloom filter.
+//! - **Tiered leveled compaction** (`compaction`) that picks
+//!   the shallowest level above its threshold and merges it
+//!   down. Compaction can run synchronously
+//!   ([`Lattice::compact`]) or on a dedicated background thread
+//!   ([`Lattice::compact_async`]).
+//!
+//! On top of that storage layer it exposes:
+//!
+//! - **Snapshots** (`snapshot`) — read-only point-in-time views
+//!   that pin the memtables and `SSTable` readers they need.
+//! - **Transactions** (`transaction`) — snapshot-isolated
+//!   read-modify-write closures with per-key conflict detection
+//!   via an internal `ConflictTracker` module (loom-tested).
+//! - A **streaming scan iterator** ([`Lattice::scan_iter`]) that
+//!   yields visible `(key, value)` pairs through a `BinaryHeap`
+//!   k-way merge over every LSM tier.
+//!
+//! ## Public API surface
+//!
+//! - [`Lattice`] / [`LatticeBuilder`] — opening, configuring,
+//!   reading, writing, scanning.
+//! - [`Snapshot`] — point-in-time read view.
+//! - [`Transaction`] — snapshot-isolated commit closure.
+//! - [`ScanIter`] — streaming scan iterator.
+//! - [`CompactionHandle`] — handle returned by `compact_async`.
+//! - [`WriteOptions`] — per-write durability knob.
+//! - [`Error`] / [`Result`] — error type.
+//! - [`AsyncLattice`] — `tokio` feature-gated wrapper that
+//!   shifts blocking work onto `spawn_blocking`.
+//!
+//! Everything else is `pub(crate)` and not part of the
+//! [SemVer](https://semver.org/) contract. The [public-API diff
+//! CI job][pubapi] flags any change to this surface so it stays
+//! intentional.
+//!
+//! [pubapi]: https://github.com/NicolasDeNigris91/Lattice/blob/main/.github/workflows/public-api.yml
+//!
+//! ## Companion book
+//!
+//! Every component above has its own chapter in the [companion
+//! book](https://lattice.nicolaspilegidenigris.dev). The book
+//! is the long-form design rationale; this crate documentation
+//! is the API reference.
+//!
+//! ## Cargo features
+//!
+//! - `tokio` — pulls in [`AsyncLattice`], a thin wrapper that
+//!   runs the synchronous engine on tokio's blocking pool. Use
+//!   it from inside an async function when you do not want the
+//!   blocking I/O to stall the executor.
+//! - `metrics` — records counters and histograms via the
+//!   [`metrics`](https://docs.rs/metrics) crate facade. The
+//!   facade is a no-op until the host process installs a
+//!   recorder; the runtime cost is one atomic per recorded
+//!   sample when an exporter is wired up.
+//!
+//! Both features are off by default.
 
 #![forbid(unsafe_code)]
 
