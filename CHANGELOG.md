@@ -150,6 +150,60 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - No version bump. Pure infrastructure; the next feature
   release rolls these in.
 
+## [1.25.0] - 2026-05-04
+
+Read-only handles. `LatticeBuilder::read_only(true)` and the
+new `Lattice::open_read_only` convenience produce a handle
+that can read existing data but rejects every mutation with
+`Error::ReadOnly`. The background flusher and compactor
+threads are not spawned, so a read-only handle is
+operationally cheap. Use cases: post-mortem inspection of a
+database directory, computing a checksum without disturbing
+the flusher, opening a backup archive for read-only queries,
+and tooling that should never modify the data it is
+examining.
+
+### Added
+- `LatticeBuilder::read_only(bool)` builder option (default
+  `false`) plus the `Lattice::open_read_only(path)`
+  convenience that wraps
+  `Lattice::builder(path).read_only(true).open()`.
+- `AsyncLattice::open_read_only(path)` mirrors the sync
+  helper for tokio callers.
+- New `Error::ReadOnly` variant on the public error enum.
+  Returned by `put`, `put_with`, `delete`, `flush`,
+  `flush_wal`, `compact`, and `transaction` (commit phase,
+  when the closure leaves a non-empty write set) on a
+  read-only handle. Reads (`get`, `scan`, `scan_iter`,
+  `scan_range`, `snapshot`, `checksum`,
+  `byte_size_on_disk`, `stats`, `config`, `path`,
+  `backup_to`) and read-only transactions (empty write set)
+  succeed normally.
+- `Config::read_only` field on the runtime configuration
+  snapshot, populated from the builder.
+- `--read-only` flag on the `lattice` CLI binary. Combines
+  with any subcommand; mutating subcommands error,
+  read-only subcommands work normally.
+- `tests/read_only.rs` (7 contract tests):
+  `read_only_open_observes_existing_data`,
+  `read_only_rejects_put_delete_flush_compact`,
+  `read_only_config_reflects_the_flag`,
+  `read_only_snapshot_and_scan_iter_work_normally`,
+  `read_only_transaction_with_writes_returns_read_only_error`,
+  `read_only_transaction_with_only_reads_succeeds`,
+  `read_only_is_compatible_with_a_concurrent_read_write_handle`.
+- Book chapter 18 ("Production readiness") gains a row in
+  the Operability matrix marking read-only handles as
+  shipped in v1.25, with pointers to the builder option and
+  the CLI flag.
+
+### Changed
+- `Inner` gains a `read_only: bool` field; `open_with` skips
+  spawning the flusher and compactor threads when set, so a
+  read-only handle costs no ambient threads. A process
+  holding many read-only handles no longer pays the
+  per-handle thread overhead.
+
 ## [1.24.0] - 2026-05-04
 
 `Snapshot` surface parity. The point-in-time view type
