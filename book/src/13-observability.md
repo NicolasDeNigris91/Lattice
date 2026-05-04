@@ -216,4 +216,45 @@ operation purely read-only against the source: a backup never
 writes to the source directory and never advances the
 source's `next_seq`.
 
+## CLI ops surface (v1.23)
+
+The `lattice` binary historically wrapped the basic CRUD
+loop (`put`, `get`, `delete`, `scan`, `compact`). v1.23 adds
+five subcommands so operators can drive the observability
+and backup primitives from a shell without writing a Rust
+program:
+
+| subcommand                        | wraps                          | output                                                |
+|-----------------------------------|--------------------------------|-------------------------------------------------------|
+| `lattice flush`                   | `Lattice::flush`               | exit 0                                                |
+| `lattice stats`                   | `Lattice::stats`               | `key: value` lines, one per [`Stats`] field           |
+| `lattice checksum`                | `Lattice::checksum`            | 16 hex chars (xxh3-64), trailing newline              |
+| `lattice disk-size`               | `Lattice::byte_size_on_disk`   | a `u64` byte count, trailing newline                  |
+| `lattice backup-to <dest>`        | `Lattice::backup_to`           | exit 0; `<dest>` becomes openable by `Lattice::open`  |
+
+The output formats are deliberately minimal: hex for the
+checksum and a bare integer for the disk size are
+script-friendly (`xargs`, `diff`, `awk`); the
+`label: value` shape of `stats` doubles as a Prometheus
+text-format-ish tail for ad-hoc dashboards.
+
+Worked example: a divergence sweep across two replicas can
+reduce to a one-liner shell pipeline:
+
+```sh
+test "$(lattice --path /db/a checksum)" = "$(lattice --path /db/b checksum)"
+```
+
+Same logical state on `/db/a` and `/db/b` produces the same
+fingerprint, regardless of how each replica got there. A
+non-zero exit from this comparison is the divergence signal.
+
+The integration suite in
+`crates/lattice-cli/tests/ops_subcommands.rs` invokes the
+built binary via `CARGO_BIN_EXE_lattice` (cargo populates
+this for any crate with a `[[bin]]` target) and asserts on
+stdout, stderr, and exit codes. The five tests cover each
+subcommand individually plus the cross-host equality
+contract for `checksum`.
+
 [`tracing-test`]: https://docs.rs/tracing-test

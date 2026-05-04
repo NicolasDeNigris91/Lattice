@@ -34,8 +34,20 @@ enum Command {
         #[arg(long)]
         prefix: Option<String>,
     },
-    /// Force a compaction pass. (Phase 4.)
+    /// Force a compaction pass.
     Compact,
+    /// Force a memtable flush to a new on-disk `SSTable`.
+    Flush,
+    /// Print operational counters as `key: value` lines.
+    Stats,
+    /// Print the deterministic xxh3-64 fingerprint of the
+    /// visible key/value set as 16 hex chars.
+    Checksum,
+    /// Print the on-disk byte footprint (live `SSTable`s + WAL).
+    DiskSize,
+    /// Copy this database into `dest` as a self-contained,
+    /// openable directory.
+    BackupTo { dest: PathBuf },
 }
 
 fn main() -> ExitCode {
@@ -102,6 +114,47 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Compact => {
             let db = Lattice::open(&cli.path).context("open database")?;
             db.compact().context("compact failed")?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Flush => {
+            let db = Lattice::open(&cli.path).context("open database")?;
+            db.flush().context("flush failed")?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Stats => {
+            let db = Lattice::open(&cli.path).context("open database")?;
+            let stats = db.stats();
+            let mut stdout = io::stdout().lock();
+            writeln!(stdout, "memtable_bytes: {}", stats.memtable_bytes)?;
+            writeln!(
+                stdout,
+                "frozen_memtable_bytes: {}",
+                stats.frozen_memtable_bytes
+            )?;
+            writeln!(stdout, "next_seq: {}", stats.next_seq)?;
+            writeln!(stdout, "pending_writes: {}", stats.pending_writes)?;
+            writeln!(stdout, "level_sstables: {:?}", stats.level_sstables)?;
+            writeln!(stdout, "total_sstables: {}", stats.total_sstables())?;
+            writeln!(stdout, "level_count: {}", stats.level_count())?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Checksum => {
+            let db = Lattice::open(&cli.path).context("open database")?;
+            let hash = db.checksum().context("checksum failed")?;
+            let mut stdout = io::stdout().lock();
+            writeln!(stdout, "{hash:016x}")?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::DiskSize => {
+            let db = Lattice::open(&cli.path).context("open database")?;
+            let bytes = db.byte_size_on_disk().context("byte_size_on_disk failed")?;
+            let mut stdout = io::stdout().lock();
+            writeln!(stdout, "{bytes}")?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::BackupTo { dest } => {
+            let db = Lattice::open(&cli.path).context("open database")?;
+            db.backup_to(&dest).context("backup_to failed")?;
             Ok(ExitCode::SUCCESS)
         }
     }
