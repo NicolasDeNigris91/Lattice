@@ -150,6 +150,83 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - No version bump. Pure infrastructure; the next feature
   release rolls these in.
 
+## [1.19.0] - 2026-05-04
+
+Asynchronous auto-compaction with backpressure. Through v1.18
+the auto-trigger inside `flush()` ran inline on the writer
+thread: a flush that lifted a level above its threshold paid
+the full compaction wall-clock before returning. v1.19 hoists
+the trigger onto the same background compactor that
+`compact_async` already used. The flush schedules a round and
+returns; the merge runs in parallel with the next WAL
+appends. Writer tail latency drops by the compaction time on
+the over-threshold flush, and the synchronous `compact()`
+keeps its blocking semantics for callers that need a
+deterministic post-call layout.
+
+A new builder knob,
+`LatticeBuilder::compaction_high_water_mark` (default
+`4 * compaction_threshold`), bounds level depth under a
+runaway producer: once any level reaches the mark, the next
+flush waits on its scheduled compaction generation before
+returning. Subsequent flushes resume the fire-and-forget path
+until the level depth drops back below the mark. Use
+`usize::MAX` to disable backpressure entirely.
+
+### Added
+- `LatticeBuilder::compaction_high_water_mark(usize)` builder
+  knob and matching `Config::compaction_high_water_mark` field
+  on the runtime configuration snapshot. Default is
+  `4 * compaction_threshold`. Lower values smooth tail latency
+  at the cost of throughput; higher values let short bursts
+  run flat-out while bounding worst-case level depth.
+- `Inner::compaction_high_water_mark` field, populated from
+  the builder, read on every flush by `maybe_compact` to
+  decide whether to wait on the scheduled round.
+- `tests/stats.rs::auto_compaction_runs_on_background_thread_after_flush_returns`
+  pins the new trigger contract: with backpressure off, twenty
+  flushes drive a `compaction_threshold = 2` database without
+  blocking on compaction; an explicit `compact()` settles the
+  state and every key reads back to its written value.
+  `tests/stats.rs::config_reports_builder_values_after_open`
+  gains a round-trip assertion for the new field plus a sanity
+  check that the default high-water mark is at least as deep
+  as the trigger threshold.
+
+### Changed
+- `flush()` no longer waits for auto-compaction. When the
+  post-install LSM state has a level above
+  `compaction_threshold`, the round is scheduled on the
+  background compactor and the writer returns. Errors from
+  the round are sticky on `CompactorShared` and surface on
+  the next user-driven `compact()` /
+  `CompactionHandle::wait()`. The compactor thread also
+  emits a `tracing::warn` event on failure so a tracing
+  subscriber sees them in real time.
+- `tests/compaction.rs::auto_compaction_at_threshold` now
+  calls `db.compact()` after the third flush to settle state
+  before the file-count assertion. Pre-v1.19 the auto-trigger
+  ran inline so the third flush was a barrier on its own;
+  v1.19 makes the post-flush layout asynchronous, and the
+  test contract is "auto-compaction does eventually run",
+  not "the third flush is itself a barrier".
+- `tests/compaction.rs::compaction_state_survives_reopen`
+  relaxes its post-reopen file-count assertion from `== 1` to
+  `>= 1`. The asynchronous trigger now drives the full
+  `run_pending_compactions` cascade per scheduled round
+  rather than the legacy single-level inline trigger, so the
+  final layout can spread across more levels than the sync
+  algorithm produced. The load-bearing contract was always
+  "data survives reopen", not the precise on-disk layout.
+- Book chapter 5 ("Compaction") gains an
+  "Async auto-compaction with backpressure (v1.19)" section
+  with the algorithm, the high-water-mark trade-off, and the
+  link to the new test fence.
+- Book chapter 12 ("Async I/O") gains an
+  "Auto-compaction is async (v1.19)" section noting that the
+  win flows to both `Lattice::flush` and `AsyncLattice::flush`
+  for free.
+
 ## [1.18.0] - 2026-05-04
 
 Two read-only inventory methods that round out the
