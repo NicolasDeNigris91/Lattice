@@ -33,7 +33,7 @@ crc32fast = "1.4"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Compression
-lz4_flex = { version = "0.11", default-features = false, features = ["safe-encode", "safe-decode", "std"] }
+lz4_flex = { version = "0.13", default-features = false, features = ["safe-encode", "safe-decode", "std"] }
 
 # Cipher (phase A of the v2.0 encryption-at-rest milestone;
 # see book chapter 19). XChaCha20-Poly1305 picked for its
