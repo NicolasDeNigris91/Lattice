@@ -36,7 +36,9 @@ scope**.
 |---|---|---|
 | Tracing instrumentation | shipped | `#[tracing::instrument]` on every public method (chapter 13). |
 | Metrics facade | shipped | Opt-in `metrics` feature, chapter 14. Wires to Prometheus, statsd, OTel, etc. via the host process's recorder. |
-| Backups | deferred | The WAL plus `*.sst` directory is byte-copyable when the database is closed. Online snapshots tracked as v2.x. |
+| Inventory and fingerprint | shipped (v1.18) | `Lattice::byte_size_on_disk()` for capacity dashboards, `Lattice::checksum()` for cross-host divergence detection. CLI `lattice disk-size` / `lattice checksum` (v1.23) expose the same surface. |
+| Online backup | shipped (v1.21) | `Lattice::backup_to(dest)` produces a self-contained directory openable by `Lattice::open`. Captures live SSTables and replays the in-memory memtables into a fresh WAL. CLI `lattice backup-to <dest>` exposes the same primitive. |
+| Read-only handles | shipped (v1.25) | `LatticeBuilder::read_only(true)` and `Lattice::open_read_only`; mutations error with `Error::ReadOnly`, the flusher and compactor threads are not spawned. CLI `--read-only` flag mirrors it. |
 | Online replication | out of scope (v2.x) | See chapter 8 ("Replication"). |
 | Hot upgrade path | shipped | On-disk format version bumps include a forward-compat reopen path. |
 | Pluggable storage backends | out of scope | Lattice owns the storage path end-to-end. |

@@ -44,4 +44,14 @@ pub enum Error {
     /// failed generation).
     #[error("compaction failed: {0}")]
     Compaction(String),
+
+    /// A mutation (`put`, `put_with`, `delete`, `flush`,
+    /// `compact`, `compact_async`, `transaction` with non-empty
+    /// write set) was attempted on a handle opened with
+    /// [`crate::LatticeBuilder::read_only`]. Reads
+    /// (`get`, `scan`, `scan_iter`, `scan_range`, `snapshot`,
+    /// `checksum`, `byte_size_on_disk`, `stats`, `config`,
+    /// `path`) are allowed and do not return this error.
+    #[error("read-only handle: cannot perform mutation")]
+    ReadOnly,
 }

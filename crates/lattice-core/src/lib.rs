@@ -250,6 +250,9 @@ pub struct Config {
     /// Number of buffered non-durable writes that triggers an
     /// inline `fsync`. See [`LatticeBuilder::commit_batch`].
     pub commit_batch: usize,
+    /// Whether the handle was opened in read-only mode. See
+    /// [`LatticeBuilder::read_only`].
+    pub read_only: bool,
 }
 
 /// Per-write knobs. Today this is only `durable`; future options
@@ -280,6 +283,7 @@ pub struct LatticeBuilder {
     compaction_high_water_mark: usize,
     commit_window: Duration,
     commit_batch: usize,
+    read_only: bool,
 }
 
 impl LatticeBuilder {
@@ -339,6 +343,34 @@ impl LatticeBuilder {
     #[must_use]
     pub const fn commit_batch(mut self, batch: usize) -> Self {
         self.commit_batch = batch;
+        self
+    }
+
+    /// Open the handle in read-only mode. Default is `false`
+    /// (read-write). When `true`:
+    ///
+    /// - The WAL is replayed at open time so any pending
+    ///   durable writes from a previous session are visible.
+    /// - The background flusher and compactor threads are
+    ///   *not* spawned, so a read-only handle costs no
+    ///   ambient threads.
+    /// - Every mutation method (`put`, `put_with`, `delete`,
+    ///   `flush`, `flush_wal`, `compact`, `compact_async`,
+    ///   `transaction` with a non-empty write set,
+    ///   `backup_to`) returns
+    ///   [`Error::ReadOnly`].
+    /// - Reads (`get`, `scan`, `scan_iter`, `scan_range`,
+    ///   `snapshot`, `checksum`, `byte_size_on_disk`,
+    ///   `stats`, `config`, `path`) work normally.
+    ///
+    /// Use cases: post-mortem inspection of a database
+    /// directory, computing a checksum without disturbing the
+    /// flusher, opening a backup archive for read-only
+    /// queries, and tooling that should never modify the data
+    /// it is examining.
+    #[must_use]
+    pub const fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
         self
     }
 
@@ -449,6 +481,10 @@ struct Inner {
     /// backpressure). Default is `4 * compaction_threshold`.
     compaction_high_water_mark: usize,
     commit_batch: usize,
+    /// Whether this handle was opened in read-only mode. v1.25.
+    /// Mutations early-return [`Error::ReadOnly`]; flusher and
+    /// compactor threads are not spawned.
+    read_only: bool,
     /// Mirror of the builder's `commit_window` value so
     /// [`Lattice::config`] can return it. The flusher thread
     /// captures the same value at spawn time; the field stored
@@ -631,7 +667,15 @@ impl Lattice {
             compaction_high_water_mark: DEFAULT_COMPACTION_HIGH_WATER_MARK,
             commit_window: DEFAULT_COMMIT_WINDOW,
             commit_batch: DEFAULT_COMMIT_BATCH,
+            read_only: false,
         }
+    }
+
+    /// Open the database directory at `path` in read-only mode.
+    /// Equivalent to `Lattice::builder(path).read_only(true).open()`.
+    /// See [`LatticeBuilder::read_only`] for the contract.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        Self::builder(path).read_only(true).open()
     }
 
     /// Open or create a database at `path` with all defaults.
@@ -671,6 +715,7 @@ impl Lattice {
             compaction_high_water_mark,
             commit_window,
             commit_batch,
+            read_only,
         } = builder;
         fs::create_dir_all(&path)?;
 
@@ -735,36 +780,47 @@ impl Lattice {
             compaction_high_water_mark,
             commit_batch,
             commit_window,
+            read_only,
             flusher_stop: AtomicBool::new(false),
             flusher_join: Mutex::new(None),
             compactor: Arc::new(CompactorShared::new()),
             compactor_join: Mutex::new(None),
         });
 
-        // Spawn the background flusher. It holds a `Weak<Inner>` so
-        // it does not keep the engine alive on its own, and exits on
-        // either `flusher_stop = true` or the last strong `Arc`
-        // dropping.
-        let weak = Arc::downgrade(&inner);
-        let join = thread::Builder::new()
-            .name("lattice-flusher".into())
-            .spawn(move || flusher_loop(weak, commit_window))
-            .expect("spawn lattice-flusher thread");
-        *inner.flusher_join.lock() = Some(join);
+        // Read-only handles never produce non-durable WAL
+        // appends or auto-compaction triggers, so the
+        // background flusher and compactor have nothing to do.
+        // Skipping them keeps a read-only handle thread-free
+        // (operationally cheap) and means a process that holds
+        // many read-only handles does not pay 2N idle threads.
+        if !read_only {
+            // Spawn the background flusher. It holds a
+            // `Weak<Inner>` so it does not keep the engine
+            // alive on its own, and exits on either
+            // `flusher_stop = true` or the last strong `Arc`
+            // dropping.
+            let weak = Arc::downgrade(&inner);
+            let join = thread::Builder::new()
+                .name("lattice-flusher".into())
+                .spawn(move || flusher_loop(weak, commit_window))
+                .expect("spawn lattice-flusher thread");
+            *inner.flusher_join.lock() = Some(join);
 
-        // Spawn the background compactor. The worker holds the
-        // compactor's shared state directly (so it can wait on the
-        // condvar without keeping `Inner` alive) plus a `Weak<Inner>`
-        // it upgrades only while a round is actually in flight. Exits
-        // on `compactor.shutdown()` (set by `Inner::Drop`) or when
-        // the last strong `Arc<Inner>` goes away.
-        let weak = Arc::downgrade(&inner);
-        let compactor_state = Arc::clone(&inner.compactor);
-        let join = thread::Builder::new()
-            .name("lattice-compactor".into())
-            .spawn(move || compactor_loop(weak, compactor_state))
-            .expect("spawn lattice-compactor thread");
-        *inner.compactor_join.lock() = Some(join);
+            // Spawn the background compactor. The worker holds
+            // the compactor's shared state directly (so it can
+            // wait on the condvar without keeping `Inner`
+            // alive) plus a `Weak<Inner>` it upgrades only
+            // while a round is actually in flight. Exits on
+            // `compactor.shutdown()` (set by `Inner::Drop`) or
+            // when the last strong `Arc<Inner>` goes away.
+            let weak = Arc::downgrade(&inner);
+            let compactor_state = Arc::clone(&inner.compactor);
+            let join = thread::Builder::new()
+                .name("lattice-compactor".into())
+                .spawn(move || compactor_loop(weak, compactor_state))
+                .expect("spawn lattice-compactor thread");
+            *inner.compactor_join.lock() = Some(join);
+        }
 
         Ok(Self { inner })
     }
@@ -792,6 +848,9 @@ impl Lattice {
         fields(key_len = key.len(), value_len = value.len(), durable = opts.durable),
     )]
     fn put_with_inner(&self, key: &[u8], value: &[u8], opts: WriteOptions) -> Result<()> {
+        if self.inner.read_only {
+            return Err(Error::ReadOnly);
+        }
         let started = Instant::now();
         let entry = LogEntry::Put {
             key: key.to_vec(),
@@ -829,6 +888,9 @@ impl Lattice {
 
     #[instrument(level = "debug", skip(self), fields(key_len = key.len()))]
     fn delete_inner(&self, key: &[u8]) -> Result<()> {
+        if self.inner.read_only {
+            return Err(Error::ReadOnly);
+        }
         let started = Instant::now();
         let entry = LogEntry::Delete { key: key.to_vec() };
         let needs_flush = {
@@ -848,6 +910,9 @@ impl Lattice {
     /// nothing is pending.
     #[instrument(level = "debug", skip(self))]
     pub fn flush_wal(&self) -> Result<()> {
+        if self.inner.read_only {
+            return Err(Error::ReadOnly);
+        }
         if self.inner.pending_writes.load(Ordering::Acquire) == 0 {
             return Ok(());
         }
@@ -1078,6 +1143,9 @@ impl Lattice {
     /// `tracing::warn` events in real time).
     #[instrument(level = "info", skip(self))]
     pub fn flush(&self) -> Result<()> {
+        if self.inner.read_only {
+            return Err(Error::ReadOnly);
+        }
         let started = Instant::now();
         let mutation_guard = self.inner.mutation_lock.lock();
 
@@ -1174,6 +1242,9 @@ impl Lattice {
     /// levels (~`log_T(N)`) rather than the total dataset size.
     #[instrument(level = "info", skip(self))]
     pub fn compact(&self) -> Result<()> {
+        if self.inner.read_only {
+            return Err(Error::ReadOnly);
+        }
         self.compact_async().wait()
     }
 
@@ -1468,6 +1539,7 @@ impl Lattice {
             compaction_high_water_mark: self.inner.compaction_high_water_mark,
             commit_window: self.inner.commit_window,
             commit_batch: self.inner.commit_batch,
+            read_only: self.inner.read_only,
         }
     }
 
@@ -1779,6 +1851,17 @@ impl Lattice {
         let snapshot_seq = active_guard.snapshot_seq;
         let mut tx = Transaction::new(snapshot, snapshot_seq);
         let outcome = f(&mut tx)?;
+
+        // Read-only handles allow read-only transactions
+        // (closures whose write_set is empty after the body
+        // returns), but reject any commit that would mutate the
+        // database. We check after the closure runs so the
+        // closure can use `tx.get` and conditional logic
+        // without hitting the guard prematurely.
+        if self.inner.read_only && !tx.write_set.is_empty() {
+            drop(active_guard);
+            return Err(Error::ReadOnly);
+        }
 
         // Atomic check-then-apply under the WAL mutex. Holding it
         // through both phases prevents any plain put or delete from

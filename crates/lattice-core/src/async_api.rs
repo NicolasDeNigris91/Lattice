@@ -42,6 +42,18 @@ impl AsyncLattice {
         Ok(Self { inner })
     }
 
+    /// Open the database directory at `path` in read-only mode.
+    /// Equivalent to wrapping
+    /// `Lattice::open_read_only(path)`. See
+    /// [`crate::LatticeBuilder::read_only`] for the contract.
+    pub async fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        let path: PathBuf = path.as_ref().to_path_buf();
+        let inner = tokio::task::spawn_blocking(move || Lattice::open_read_only(path))
+            .await
+            .map_err(join_to_err)??;
+        Ok(Self { inner })
+    }
+
     /// Insert or overwrite a value for `key`.
     pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
         let inner = self.inner.clone();

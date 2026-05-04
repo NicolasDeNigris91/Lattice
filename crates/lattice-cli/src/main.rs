@@ -17,6 +17,14 @@ struct Cli {
     #[arg(long, default_value = "./data.lattice")]
     path: PathBuf,
 
+    /// Open the database in read-only mode (v1.25). Mutating
+    /// subcommands (`put`, `delete`, `flush`, `compact`,
+    /// `backup-to`) error with `read-only handle` when this
+    /// flag is set; reading subcommands (`get`, `scan`,
+    /// `stats`, `checksum`, `disk-size`) work normally.
+    #[arg(long)]
+    read_only: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -72,16 +80,29 @@ fn init_tracing() {
         .init();
 }
 
+fn open_db(path: &PathBuf, read_only: bool) -> Result<Lattice> {
+    if read_only {
+        Lattice::open_read_only(path).context("open database (read-only)")
+    } else {
+        Lattice::open(path).context("open database")
+    }
+}
+
 fn run(cli: Cli) -> Result<ExitCode> {
-    match cli.command {
+    let Cli {
+        path,
+        read_only,
+        command,
+    } = cli;
+    match command {
         Command::Put { key, value } => {
-            let db = Lattice::open(&cli.path).context("open database")?;
+            let db = open_db(&path, read_only)?;
             db.put(key.as_bytes(), value.as_bytes())
                 .context("put failed")?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Get { key } => {
-            let db = Lattice::open(&cli.path).context("open database")?;
+            let db = open_db(&path, read_only)?;
             match db.get(key.as_bytes()).context("get failed")? {
                 Some(value) => {
                     let mut stdout = io::stdout().lock();
@@ -93,12 +114,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
         }
         Command::Delete { key } => {
-            let db = Lattice::open(&cli.path).context("open database")?;
+            let db = open_db(&path, read_only)?;
             db.delete(key.as_bytes()).context("delete failed")?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Scan { prefix } => {
-            let db = Lattice::open(&cli.path).context("open database")?;
+            let db = open_db(&path, read_only)?;
             let pairs = db
                 .scan(prefix.as_deref().map(str::as_bytes))
                 .context("scan failed")?;
@@ -112,17 +133,17 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Compact => {
-            let db = Lattice::open(&cli.path).context("open database")?;
+            let db = open_db(&path, read_only)?;
             db.compact().context("compact failed")?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Flush => {
-            let db = Lattice::open(&cli.path).context("open database")?;
+            let db = open_db(&path, read_only)?;
             db.flush().context("flush failed")?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Stats => {
-            let db = Lattice::open(&cli.path).context("open database")?;
+            let db = open_db(&path, read_only)?;
             let stats = db.stats();
             let mut stdout = io::stdout().lock();
             writeln!(stdout, "memtable_bytes: {}", stats.memtable_bytes)?;
@@ -139,21 +160,21 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Checksum => {
-            let db = Lattice::open(&cli.path).context("open database")?;
+            let db = open_db(&path, read_only)?;
             let hash = db.checksum().context("checksum failed")?;
             let mut stdout = io::stdout().lock();
             writeln!(stdout, "{hash:016x}")?;
             Ok(ExitCode::SUCCESS)
         }
         Command::DiskSize => {
-            let db = Lattice::open(&cli.path).context("open database")?;
+            let db = open_db(&path, read_only)?;
             let bytes = db.byte_size_on_disk().context("byte_size_on_disk failed")?;
             let mut stdout = io::stdout().lock();
             writeln!(stdout, "{bytes}")?;
             Ok(ExitCode::SUCCESS)
         }
         Command::BackupTo { dest } => {
-            let db = Lattice::open(&cli.path).context("open database")?;
+            let db = open_db(&path, read_only)?;
             db.backup_to(&dest).context("backup_to failed")?;
             Ok(ExitCode::SUCCESS)
         }
