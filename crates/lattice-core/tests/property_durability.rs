@@ -417,6 +417,45 @@ proptest! {
             "scan_iter must agree with the BTreeMap reference");
     }
 
+    /// `backup_to` produces a state-equivalent copy.
+    /// Replaying any random op history into a database,
+    /// taking a backup to a fresh directory, then opening
+    /// that directory must yield the same observable
+    /// `(key, value)` set as the source. The pinned
+    /// invariant is the v1.18 checksum equality applied to
+    /// the backup as a "replica": same logical state,
+    /// regardless of how the layout differs internally.
+    #[test]
+    fn backup_to_is_state_equivalent_under_random_history(
+        ops in proptest::collection::vec(arb_op(), 0..120),
+    ) {
+        let src_dir = tempdir().unwrap();
+        let backup_dir = tempdir().unwrap();
+        let db = Lattice::open(src_dir.path()).unwrap();
+
+        let mut reference: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        let mut all_keys: BTreeSet<Vec<u8>> = BTreeSet::new();
+        replay(&db, &ops, &mut reference, &mut all_keys);
+
+        let source_checksum = db.checksum().unwrap();
+        db.backup_to(backup_dir.path()).unwrap();
+
+        let restored = Lattice::open(backup_dir.path()).unwrap();
+        prop_assert_eq!(
+            restored.checksum().unwrap(),
+            source_checksum,
+            "backup must produce a state-equivalent copy",
+        );
+        for key in &all_keys {
+            prop_assert_eq!(
+                restored.get(key).unwrap(),
+                reference.get(key).cloned(),
+                "key {:?} diverged after backup + reopen",
+                key,
+            );
+        }
+    }
+
     /// `checksum` is invariant under [`Lattice::flush`] and
     /// [`Lattice::compact`]. The hash is computed over the
     /// visible `(key, value)` set in ascending key order;

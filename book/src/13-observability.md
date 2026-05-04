@@ -164,4 +164,56 @@ and asserts the hash agrees before and after the layout
 move. Pre-v1.18 this property had no API to verify; v1.18
 both ships the API and pins it under the property suite.
 
+## Backup (v1.21)
+
+`Lattice::backup_to(dest) -> Result<()>` produces a
+self-contained directory that `Lattice::open` can open and
+observe the same logical state as the source database. The
+result is the atomic unit a backup tool would archive (tar,
+upload to object storage, ship to a replica) and a future
+restore workflow consumes directly.
+
+Algorithm:
+
+1. Take the engine's mutation lock and the active memtable's
+   read lock. Together they freeze the in-memory and
+   on-disk components for the duration of the copy:
+   concurrent flushes, compactions, puts, and deletes block
+   until the backup completes.
+2. Copy each live `SSTable` file to `dest`, preserving its
+   sequence-number filename so the manifest can refer to it.
+3. Write a manifest at `dest` matching the source's level
+   layout (`Manifest::save` is atomic, temp + rename + fsync).
+4. Replay the frozen and active memtables into a fresh
+   `wal.log` at `dest`, frozen first then active so
+   last-writer-wins on replay matches the source's view.
+5. `fsync` the destination directory.
+
+The cross-host divergence-detection contract from v1.18
+applies to the backup as a "replica": `restored.checksum() ==
+source.checksum()` is the load-bearing equivalence assertion,
+covered by an integration test plus a property fence
+(`backup_to_is_state_equivalent_under_random_history`,
+64 cases per `cargo test`).
+
+Trade-offs:
+
+- The simple lock-based approach is correct but stalls
+  writers for the duration of the copy. For small to
+  medium databases this is acceptable; for multi-GB databases
+  a snapshot-based hard-link backup that does not stall
+  writers is the next optimisation, listed in chapter 8.
+- The backup directory is independent of the source: a
+  backup taken at time `T` is a frozen view at `T`,
+  insulated from post-backup writes. An integration test
+  pins this independence by mutating the source after the
+  backup and verifying the restored database still reflects
+  the `T` state.
+
+The design choice for replaying memtables into the backup's
+WAL (rather than forcing a flush before the backup) keeps the
+operation purely read-only against the source: a backup never
+writes to the source directory and never advances the
+source's `next_seq`.
+
 [`tracing-test`]: https://docs.rs/tracing-test

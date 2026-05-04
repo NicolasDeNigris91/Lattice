@@ -1603,6 +1603,130 @@ impl Lattice {
         Ok(hasher.digest())
     }
 
+    /// Copy this database into `dest` as a self-contained
+    /// directory openable by [`Self::open`]. The result is
+    /// the atomic unit a backup tool would archive (tar,
+    /// upload to object storage, ship to a replica) and a
+    /// future restore workflow consumes directly.
+    ///
+    /// The backup captures the live `SSTable` files, a
+    /// matching manifest, and the in-memory memtable
+    /// contents replayed into a fresh write-ahead log at
+    /// `dest`. Reopening the backup with `Lattice::open`
+    /// observes the same logical state as the source: the
+    /// same visible keys with the same values, the same
+    /// [`Self::checksum`], and the same response to a future
+    /// recovery sweep. The backup directory is independent
+    /// of the source; subsequent writes to the source are
+    /// not visible to a `Lattice::open` of the backup.
+    ///
+    /// `dest` is created if missing. The call holds the
+    /// engine's mutation lock and the active memtable's
+    /// read lock for the duration of the copy, so concurrent
+    /// flush, compact, put, and delete calls block until
+    /// the backup completes. This is the simplest correct
+    /// synchronisation; a snapshot-based hard-link backup
+    /// that does not stall writers is a future optimisation.
+    /// Practical guidance: schedule backups during a
+    /// maintenance window, or accept the latency hit on
+    /// writers in exchange for crash-safe ops.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use lattice_core::Lattice;
+    /// let src_dir = tempfile::tempdir()?;
+    /// let backup_dir = tempfile::tempdir()?;
+    /// let db = Lattice::open(src_dir.path())?;
+    /// db.put(b"k", b"v")?;
+    /// db.backup_to(backup_dir.path())?;
+    ///
+    /// let restored = Lattice::open(backup_dir.path())?;
+    /// assert_eq!(restored.get(b"k")?.as_deref(), Some(b"v".as_slice()));
+    /// # Ok::<_, Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn backup_to(&self, dest: impl AsRef<Path>) -> Result<()> {
+        let dest = dest.as_ref();
+        fs::create_dir_all(dest)?;
+
+        // mutation_lock blocks concurrent flush and compact;
+        // active.read() blocks concurrent puts and deletes
+        // (which take active.write()). Together they freeze
+        // both the in-memory and on-disk components for the
+        // duration of the copy. We do not take wal.lock
+        // because we are not appending to the source's WAL;
+        // the active.read() guard is enough to prevent the
+        // memtable from advancing under us.
+        let _mutation_guard = self.inner.mutation_lock.lock();
+        let active = self.inner.active.read();
+        let state = self.inner.state.read().clone();
+
+        // Step 1: copy each live SSTable to dest. Files are
+        // copied by path because the manifest we will write
+        // refers to them by sequence number; the destination
+        // file name must match the source's exactly.
+        for level in &state.levels {
+            for reader in level {
+                let seq = reader.seq();
+                let src_path = sstable_path(&self.inner.path, seq);
+                let dst_path = sstable_path(dest, seq);
+                fs::copy(&src_path, &dst_path)?;
+            }
+        }
+
+        // Step 2: persist a manifest matching the source's
+        // level layout. `Manifest::save` writes the file
+        // atomically (temp + rename) and `fsync`s.
+        let manifest_levels: Vec<Vec<u64>> = state
+            .levels
+            .iter()
+            .map(|level| level.iter().map(|r| r.seq()).collect())
+            .collect();
+        let manifest = Manifest {
+            version: crate::manifest::MANIFEST_VERSION,
+            next_seq: state.next_seq,
+            levels: manifest_levels,
+        };
+        manifest.save(dest)?;
+
+        // Step 3: replay the memtables into a fresh WAL at
+        // dest. Order is frozen first (older), then active
+        // (newer), so last-writer-wins on replay matches the
+        // source's view. Removing any pre-existing wal.log
+        // first is defensive: a `dest` from a prior backup
+        // run might have one.
+        let wal_path = dest.join("wal.log");
+        let _ = fs::remove_file(&wal_path);
+        let (mut wal, _) = Wal::open(&wal_path)?;
+        let to_entry = |key: &[u8], value: Option<&[u8]>| -> LogEntry {
+            value.map_or_else(
+                || LogEntry::Delete { key: key.to_vec() },
+                |v| LogEntry::Put {
+                    key: key.to_vec(),
+                    value: v.to_vec(),
+                },
+            )
+        };
+        if let Some(frozen) = state.frozen.as_ref() {
+            for (key, value) in frozen.iter_all() {
+                wal.append_pending(&to_entry(key, value))?;
+            }
+        }
+        for (key, value) in active.iter_all() {
+            wal.append_pending(&to_entry(key, value))?;
+        }
+        drop(active);
+        wal.sync_pending()?;
+        drop(wal);
+
+        // Step 4: `fsync` the destination directory so the
+        // manifest, SSTables, and WAL are all durably linked
+        // before we return.
+        sync_dir(dest)?;
+
+        Ok(())
+    }
+
     /// Run a closure inside a snapshot-isolated transaction. Reads
     /// inside the closure see the database as of the transaction
     /// start, layered on top of the transaction's own staged
