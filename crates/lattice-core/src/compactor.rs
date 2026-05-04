@@ -65,6 +65,10 @@ use std::sync::atomic::AtomicU64;
 // every call site through a typedef; constructing the shared
 // state without an outer `Arc` keeps the API one-size-fits-both.
 use std::sync::Arc;
+#[cfg(loom)]
+use std::time::Duration;
+#[cfg(not(loom))]
+use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 
@@ -151,6 +155,79 @@ impl CompactorShared {
         Ok(())
     }
 
+    /// Bounded variant of [`Self::wait_for`]. Block up to
+    /// `timeout` for the round to complete (or for the
+    /// compactor to shut down). Returns `Ok(true)` if the
+    /// target was reached or the engine is shutting down,
+    /// `Ok(false)` if the deadline elapsed before either, and
+    /// `Err(Error::Compaction(...))` if the round (or any later
+    /// round whose error has not yet been cleared) failed.
+    ///
+    /// Spurious wake-ups from the underlying `Condvar` are
+    /// folded back into the loop: each iteration recomputes the
+    /// remaining time against an absolute deadline, so the
+    /// caller always sees at most one wait of `timeout`.
+    #[cfg(not(loom))]
+    pub fn wait_for_timeout(&self, target: u64, timeout: Duration) -> Result<bool> {
+        let deadline = Instant::now() + timeout;
+        let mut state = lock(&self.state);
+        let timed_out = loop {
+            if state.shutdown || state.completed_generation >= target {
+                break false;
+            }
+            let now = Instant::now();
+            let remaining = deadline.saturating_duration_since(now);
+            if remaining.is_zero() {
+                break true;
+            }
+            let result = self.cv.wait_for(&mut state, remaining);
+            if result.timed_out() && !state.shutdown && state.completed_generation < target {
+                break true;
+            }
+        };
+        let err = state.last_error.clone();
+        drop(state);
+        if let Some(err) = err {
+            return Err(Error::Compaction(err));
+        }
+        Ok(!timed_out)
+    }
+
+    /// Loom variant of [`Self::wait_for_timeout`]. Loom's
+    /// `Condvar::wait_timeout` returns the guard alongside the
+    /// timeout flag; otherwise the algorithm is identical to
+    /// the production version.
+    #[cfg(loom)]
+    pub fn wait_for_timeout(&self, target: u64, timeout: Duration) -> Result<bool> {
+        let mut state = lock(&self.state);
+        let mut remaining = timeout;
+        let timed_out = loop {
+            if state.shutdown || state.completed_generation >= target {
+                break false;
+            }
+            if remaining.is_zero() {
+                break true;
+            }
+            let (new_state, result) = self.cv.wait_timeout(state, remaining).unwrap();
+            state = new_state;
+            if result.timed_out() && !state.shutdown && state.completed_generation < target {
+                break true;
+            }
+            // Loom's deterministic scheduler does not expose a
+            // wall clock, so we cannot recompute remaining from
+            // an Instant. One pass through the wait is enough
+            // for loom's interleaving check; subsequent passes
+            // would not exercise additional schedules.
+            remaining = Duration::ZERO;
+        };
+        let err = state.last_error.clone();
+        drop(state);
+        if let Some(err) = err {
+            return Err(Error::Compaction(err));
+        }
+        Ok(!timed_out)
+    }
+
     /// Worker entry point: wait for a request, return the captured
     /// generation. Returns `None` when the compactor is shutting
     /// down and the worker should exit.
@@ -233,6 +310,23 @@ impl CompactionHandle {
     /// round whose error has not yet been cleared) failed.
     pub fn wait(self) -> Result<()> {
         self.shared.wait_for(self.target_generation)
+    }
+
+    /// Bounded variant of [`Self::wait`]. Block up to `timeout`
+    /// for the scheduled round to complete (or the engine to
+    /// shut down). Returns `Ok(true)` on completion, `Ok(false)`
+    /// if the deadline elapsed first, and
+    /// `Err(Error::Compaction(...))` on a sticky compaction
+    /// failure.
+    ///
+    /// On `Ok(false)` the round itself is *not* cancelled: the
+    /// compactor thread continues to drain it. The handle is
+    /// consumed (matching `wait`); a caller that needs to retry
+    /// should schedule a fresh handle by calling
+    /// [`crate::Lattice::compact_async`] again.
+    pub fn wait_timeout(self, timeout: Duration) -> Result<bool> {
+        self.shared
+            .wait_for_timeout(self.target_generation, timeout)
     }
 
     /// Generation number captured when the round was scheduled.

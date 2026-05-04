@@ -379,3 +379,42 @@ The migration is complementary to the v1.17 strict-leveled
 rewrite: strict-leveled cuts write amplification on a single
 round; v1.19 lets the compactor consume that win in real
 time without holding up the writer.
+
+Bounded waits (v1.20)
+---------------------
+
+`CompactionHandle::wait` blocks indefinitely until the
+scheduled round completes. v1.20 adds a bounded variant,
+`CompactionHandle::wait_timeout(Duration)`, that returns
+`Ok(true)` once the round completes, `Ok(false)` if the
+deadline elapses first, and
+`Err(Error::Compaction(...))` on a sticky compaction failure.
+The handle is consumed in either case (matching `wait`); a
+caller that needs to retry schedules a fresh handle through
+`Lattice::compact_async`.
+
+Operationally the helper closes the gap between
+"fire-and-forget compaction" and "I want to know within
+N seconds whether it finished". Tests, ops dashboards, and
+async wrappers (`tokio::time::timeout` over an
+`AsyncLattice` blocking task) all reach for the bounded
+variant first.
+
+The implementation rides
+`parking_lot::Condvar::wait_for` and folds spurious wake-ups
+into a deadline-aware loop: each iteration recomputes the
+remaining time against an absolute `Instant + timeout`
+deadline, so the caller always sees at most one wait of
+`timeout`. The loom variant follows the same shape against
+`loom::sync::Condvar::wait_timeout`, and the loom suite under
+`lattice-loom-tests` continues to drive the same state
+machine the production path uses.
+
+The internal-mod test pair
+`compaction_handle_wait_timeout_returns_true_when_round_completes`
+and
+`compaction_handle_wait_timeout_returns_false_when_deadline_elapses`
+pin both branches: a real `compact_async` round with a
+generous deadline, and a synthetic handle whose target
+generation cannot be reached (`u64::MAX`) so the wait must
+observe the deadline.

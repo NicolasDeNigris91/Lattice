@@ -2106,4 +2106,60 @@ mod tests {
             );
         }
     }
+
+    /// `CompactionHandle::wait_timeout` returns `Ok(true)` once
+    /// the round completes (or the compactor is shutting down)
+    /// and `Ok(false)` if the deadline elapses first. v1.20
+    /// introduces this so async callers, ops dashboards, and
+    /// tests can bound how long they will block on a scheduled
+    /// round.
+    ///
+    /// The completion case rides a real `compact_async` round on
+    /// an empty database: the worker has nothing to do and
+    /// publishes the captured generation immediately, so a
+    /// 10-second deadline is far more than enough.
+    #[test]
+    fn compaction_handle_wait_timeout_returns_true_when_round_completes() {
+        let dir = tempdir().unwrap();
+        let db = Lattice::open(dir.path()).unwrap();
+        db.put(b"k", b"v").unwrap();
+        db.flush().unwrap();
+
+        let handle = db.compact_async();
+        let completed = handle.wait_timeout(Duration::from_secs(10)).unwrap();
+        assert!(
+            completed,
+            "compact_async on a small database must complete within 10s",
+        );
+    }
+
+    /// The timeout case constructs a handle whose target
+    /// generation cannot be reached (`u64::MAX`) and waits a
+    /// short, deterministic 50 ms. The wait must observe the
+    /// deadline and return `Ok(false)` rather than block
+    /// forever. Direct construction of `CompactionHandle` is
+    /// `pub(crate)`, so this test lives inside the crate.
+    #[test]
+    fn compaction_handle_wait_timeout_returns_false_when_deadline_elapses() {
+        let dir = tempdir().unwrap();
+        let db = Lattice::open(dir.path()).unwrap();
+        let shared = Arc::clone(&db.inner.compactor);
+        let handle = crate::compactor::CompactionHandle {
+            shared,
+            target_generation: u64::MAX,
+        };
+        let started = std::time::Instant::now();
+        let completed = handle.wait_timeout(Duration::from_millis(50)).unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            !completed,
+            "an unreachable target generation must time out, not complete",
+        );
+        // Sanity check that the wait actually paused, not
+        // returned instantly with a stale flag.
+        assert!(
+            elapsed >= Duration::from_millis(40),
+            "wait_timeout returned in {elapsed:?}; expected at least 40 ms before the deadline",
+        );
+    }
 }
