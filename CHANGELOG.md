@@ -150,6 +150,50 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - No version bump. Pure infrastructure; the next feature
   release rolls these in.
 
+## [1.18.0] - 2026-05-04
+
+Two read-only inventory methods that round out the
+operational and replication-readiness surfaces.
+`Lattice::byte_size_on_disk()` returns the total bytes the
+engine currently occupies on disk (sum of live `SSTable`
+files plus the current WAL length); memtable bytes are
+deliberately not counted because those are already in
+`Stats::memtable_bytes`. `Lattice::checksum()` returns a
+deterministic xxh3-64 fingerprint of the visible
+`(key, value)` set in ascending key order; the hash is
+invariant under `flush` and `compact` (neither changes the
+visible set) and lets two replicas on the same logical state
+agree on a divergence-detection number regardless of how
+each one got there.
+
+### Added
+- `Lattice::byte_size_on_disk(&self) -> Result<u64>`. Sums
+  every live `SSTable` file size (one `fs::metadata` syscall
+  per table) plus the current WAL file length. Cheap to call
+  but not a hot path; suitable for a capacity dashboard or
+  an alert poll on a multi-second cadence.
+- `Lattice::checksum(&self) -> Result<u64>`. Streams the
+  visible key/value pairs through a `xxhash_rust::xxh3::Xxh3`
+  hasher in key order, length-prefixing each pair so that
+  `("ab", "cd")` and `("a", "bcd")` produce different hashes.
+  Uses the existing `scan_iter` k-way merge so tombstones are
+  filtered and last-writer-wins semantics apply.
+- `tests/disk_inventory.rs` (5 tests):
+  `byte_size_on_disk_starts_small_and_grows_on_flush`,
+  `checksum_is_stable_across_flush_and_compact`,
+  `checksum_changes_when_visible_set_changes`,
+  `checksum_is_path_independent_for_same_visible_state`,
+  and `empty_database_has_a_well_defined_checksum`. The
+  path-independence test pins the cross-host divergence-
+  detection contract: two databases that reach the same
+  logical state via different operation histories produce
+  identical checksums.
+- `tests/property_durability.rs::checksum_is_invariant_under_flush_and_compact`.
+  64-case proptest fence: for every random op history, the
+  checksum before a forced flush + compact must equal the
+  checksum after. This pins the layout-vs-state distinction
+  the new method makes meaningful.
+
 ## [1.17.0] - 2026-05-04
 
 Strict-leveled compaction. A round from level `N` to `N+1` no
