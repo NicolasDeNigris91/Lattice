@@ -119,7 +119,13 @@ encryption with what associated data, key rotation, replay
 tolerance under decryption failure) are interesting in their
 own right and would distract from the storage path. A design
 sketch (XChaCha20-Poly1305, deterministic per-block nonces,
-on-disk format version bump) lives in chapter 15.
+on-disk format version bump) lives in chapter 15, and the
+full v2.0 design doc with threat model, format bump
+specification, AAD binding, performance budget, test fence
+shape, and per-phase ship plan lives in
+[chapter 19](19-encryption-design.md). The chapter-15 open
+questions on cleartext-to-encrypted upgrade policy, AAD
+binding, and test contract are resolved there.
 
 ### Fuzzing
 

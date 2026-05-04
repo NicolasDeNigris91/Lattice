@@ -20,7 +20,9 @@ single minor.
 
 ### Encryption at rest
 
-Status: design sketch in book chapter 15.
+Status: full design doc shipped in book chapter 19; ready
+to begin phase A. Chapter 15 §3 keeps the original sketch
+for context.
 
 Scope: every byte the engine writes (WAL records, SSTable
 blocks, manifest) flows through an authenticated-encryption
@@ -28,10 +30,15 @@ pipeline keyed by a user-supplied 32-byte key.
 XChaCha20-Poly1305 with deterministic per-block nonces; the
 on-disk format gains a version bump.
 
-Blockers: none technical; the open questions are around the
-cleartext-to-encrypted upgrade story, AAD scope, and
-test/fuzz coverage of the cipher path. See the open-questions
-list in chapter 15 §3.
+Blockers: none. The chapter-15 open questions are resolved
+in chapter 19: cleartext-to-encrypted upgrade refuses by
+default with an opt-in `allow_legacy_upgrade(true)` flag,
+AAD binds `(sstable_seq, block_index)` for SSTable blocks
+and equivalent location-tags for WAL records and the
+manifest, and the test fence is a round-trip property
+fence plus a wrong-key contract test plus a bit-flip fuzz
+target. The implementation phases (A through F) are
+listed in chapter 19 with per-phase test gates.
 
 ### WAL parallelisation (and the SkipMap memtable that follows)
 

@@ -39,3 +39,4 @@
 - [Design notes for v2.x](15-design-notes.md)
 - [Lattice vs the alternatives](17-comparison.md)
 - [Production readiness](18-production-readiness.md)
+- [Encryption at rest: v2.0 design doc](19-encryption-design.md)
