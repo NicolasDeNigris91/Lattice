@@ -150,6 +150,44 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - No version bump. Pure infrastructure; the next feature
   release rolls these in.
 
+## [1.21.0] - 2026-05-04
+
+`Lattice::backup_to` produces a self-contained directory
+openable by `Lattice::open`. Real ops feature alongside the
+v1.18 inventory and v1.20 bounded-wait helpers: take a
+backup, archive the directory (tar, upload to object
+storage, ship to a replica), and a future restore consumes
+it directly. The cross-host divergence-detection contract
+from v1.18 carries through: `restored.checksum() ==
+source.checksum()`.
+
+### Added
+- `Lattice::backup_to(dest) -> Result<()>`. Holds the
+  engine's mutation lock and the active memtable's read lock,
+  copies every live `SSTable` to `dest` by sequence number,
+  persists a matching manifest, replays the frozen and
+  active memtables into a fresh `wal.log`, and `fsync`s the
+  destination directory. Result: a complete database
+  directory openable by `Lattice::open`, insulated from
+  post-backup mutations to the source.
+- `tests/backup.rs` (5 contract tests):
+  `backup_to_produces_an_openable_self_contained_directory`,
+  `backup_checksum_matches_source_checksum`,
+  `backup_captures_unflushed_memtable_entries`,
+  `backup_of_empty_database_is_openable_and_empty`, and
+  `backup_directory_is_independent_of_the_source`. The
+  independence test pins the archival contract: mutations
+  to the source after the backup are not visible to a
+  reopened backup.
+- `tests/property_durability.rs::backup_to_is_state_equivalent_under_random_history`.
+  64-case proptest fence: for every random op history, the
+  source's checksum must equal the restored database's
+  checksum, and every key the test ever touched must
+  resolve identically.
+- Book chapter 13 ("Observability") gains a "Backup (v1.21)"
+  section with the algorithm, the lock-based trade-off, and
+  the future hard-link optimisation.
+
 ## [1.20.0] - 2026-05-04
 
 Bounded `CompactionHandle::wait`. The new
