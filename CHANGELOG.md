@@ -150,6 +150,44 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - No version bump. Pure infrastructure; the next feature
   release rolls these in.
 
+## [1.26.0] - 2026-05-04
+
+Deploy hardening for the static book. The Caddyfile gains
+clickjacking, framing-isolation, and content-source headers
+on top of the existing HSTS / Referrer-Policy /
+X-Content-Type-Options / Permissions-Policy set; the
+Dockerfile gains a HEALTHCHECK so an orchestrator can spot
+and recycle a wedged container without the app having to
+expose a separate health endpoint. No code or public-API
+changes; the next deploy build picks them up.
+
+### Added
+- `deploy/Caddyfile` security headers:
+  - `X-Frame-Options: DENY` and `frame-ancestors 'none'`
+    inside CSP. Defence-in-depth against clickjacking.
+  - `Content-Security-Policy: default-src 'self'; img-src
+    'self' data:; style-src 'self' 'unsafe-inline';
+    script-src 'self' 'unsafe-inline'; font-src 'self'
+    data:; connect-src 'self'; frame-ancestors 'none';
+    base-uri 'self'; form-action 'self'`. The
+    `'unsafe-inline'` is load-bearing for the mdBook theme
+    picker and the search index loader; without it the
+    served site breaks. The other directives lock every
+    resource source to same-origin.
+  - `Cross-Origin-Opener-Policy: same-origin` and
+    `Cross-Origin-Resource-Policy: same-origin`. Isolate the
+    page from cross-origin window references and prevent
+    the rendered chapters from being embedded as
+    cross-origin resources.
+- `deploy/Dockerfile` `HEALTHCHECK`: `wget --spider --quiet
+  http://127.0.0.1:${PORT:-8080}/` every 30 seconds, with a
+  10-second start-period and 3 retries. busybox `wget`
+  ships in the `caddy:2-alpine` image.
+- Book chapter 18 ("Production readiness") gains two rows
+  in the Security matrix marking deploy-side header
+  hardening and the container health probe as shipped in
+  v1.26.
+
 ## [1.25.0] - 2026-05-04
 
 Read-only handles. `LatticeBuilder::read_only(true)` and the

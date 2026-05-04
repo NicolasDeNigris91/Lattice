@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.25.0"
+version = "1.26.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -21,7 +21,7 @@ categories = ["database-implementations", "data-structures"]
 
 [workspace.dependencies]
 # Internal
-lattice-core = { path = "crates/lattice-core", version = "1.25.0" }
+lattice-core = { path = "crates/lattice-core", version = "1.26.0" }
 
 # Serialization and binary formats
 serde = { version = "1.0", features = ["derive"] }
