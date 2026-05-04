@@ -150,6 +150,69 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - No version bump. Pure infrastructure; the next feature
   release rolls these in.
 
+## [1.17.0] - 2026-05-04
+
+Strict-leveled compaction. A round from level `N` to `N+1` no
+longer appends its merged output to whatever already lived in
+the target level. The compactor now picks the overlapping
+subset of `N+1` (the tables whose key range intersects the
+combined source range) and merges only that slice with the
+source. Non-overlapping target tables keep their sequence
+numbers and on-disk files. Closes the `v1.4+` deferral noted
+in book chapters 5 and 8 and flips the comparison row in
+chapter 17 from "tiered leveled" to "strict leveled".
+
+### Added
+- `SSTableReader::min_key()` and `SSTableReader::max_key()`
+  accessors. Both are computed at open time and cached on the
+  reader: `min_key` from the first index entry, `max_key` from
+  the last data block's terminal entry. The strict-leveled
+  compactor consults these to compute level-N+1 overlap subsets
+  without reaching for disk.
+- `compaction::CompactOutcome` enum (`Wrote` and `Empty`). The
+  merge can now report when every source key was tombstoned and
+  `drop_tombstones` was true; in that case no file is written
+  and the install step skips appending a new table.
+- `tests::strict_leveled_keeps_non_overlapping_l1_sstables_intact`
+  test fence. Constructs `L1` with three disjoint ranges, then
+  drives a fourth round whose source covers only one of them.
+  Pre-v1.17 the round produced four `L1` tables; v1.17 produces
+  three (the overlap rewritten in place, the other two
+  untouched by sequence number).
+
+### Changed
+- `compact_level` now merges the source level **plus the
+  overlapping subset of the target level** rather than the
+  source alone. Install replaces the overlap subset and keeps
+  the rest of the target level in place; `next_seq` advances
+  even when the merge cancels out so future flushes do not
+  collide with the unused number. Net effect on workloads that
+  touch a hot subset of the keyspace: a 1 GB `L1` against a
+  100 MB `L0` rewrites only the overlap (often under 200 MB)
+  instead of the full 1.1 GB. The property fence
+  `arbitrary_ops_match_btreemap_after_reopen` runs unchanged;
+  selective merge preserves the same observable
+  `(key, value)` set.
+- The drop-tombstones rule tightens. Pre-v1.17 it was "no
+  level at or below the target holds tables"; v1.17 refines it
+  to "no level deeper than the target holds tables". The
+  target level's keep-in-place subset is by construction
+  range-disjoint from the source and cannot hold an older
+  version of any merged key.
+- `compaction::compact_all` returns
+  `Result<CompactOutcome>` instead of `Result<usize>`. The
+  `usize` (live count) was never read by callers; the new
+  enum carries the information that actually matters
+  downstream (whether a file was created at all). Internal
+  function; no public API change.
+- `SSTableReader::open` rejects sstables with an empty data
+  region. The pre-v1.17 algorithm could write empty tables
+  (every input cancelled out by `drop_tombstones`); the v1.17
+  algorithm refuses to even create the file in that case, so
+  reading one back is now an integrity error. Existing
+  databases written by previous versions never trigger this
+  path because they always wrote at least one entry.
+
 ## [1.16.0] - 2026-05-01
 
 Two API additions that round out the operational and
