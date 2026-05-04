@@ -150,6 +150,50 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - No version bump. Pure infrastructure; the next feature
   release rolls these in.
 
+## [1.22.0] - 2026-05-04
+
+`AsyncLattice` surface parity. The synchronous engine grew
+several read-only and ops methods between v1.18 and v1.21
+(inventory, fingerprinting, backup, bounded compaction
+wait); v1.22 pulls them all into the tokio wrapper so an
+async caller never has to drop down to `.sync()` for the new
+surface. Cheap reads (stats, config, path, compact_async)
+run inline on the calling task; everything that blocks on
+disk I/O or a condvar goes through `spawn_blocking` so the
+executor stays responsive.
+
+### Added
+- `AsyncLattice::byte_size_on_disk(&self) -> Result<u64>`
+  (mirrors `Lattice::byte_size_on_disk`, dispatches via
+  `spawn_blocking`).
+- `AsyncLattice::checksum(&self) -> Result<u64>`
+  (mirrors `Lattice::checksum`, dispatches via
+  `spawn_blocking`).
+- `AsyncLattice::backup_to(&self, dest)` (mirrors
+  `Lattice::backup_to`, dispatches via `spawn_blocking`).
+- `AsyncLattice::stats() -> Stats`,
+  `AsyncLattice::config() -> Config`, and
+  `AsyncLattice::path() -> &Path`. Inline (no
+  `spawn_blocking`) because each is a cheap in-memory read.
+- `AsyncLattice::compact_async() -> CompactionHandle`.
+  Inline because `compact_async` just bumps a generation
+  counter.
+- `AsyncLattice::wait_compact(handle)` and
+  `AsyncLattice::wait_compact_timeout(handle, timeout)`.
+  Both dispatch via `spawn_blocking` because the underlying
+  condvar waits are blocking.
+- Five new contract tests in `tests/async_api.rs`:
+  `async_byte_size_on_disk_grows_after_flush`,
+  `async_checksum_matches_sync_handle` (replicates the
+  cross-host divergence-detection hash equality),
+  `async_backup_to_produces_openable_directory`,
+  `async_stats_and_config_are_cheap_inline_reads`, and
+  `async_compact_async_returns_a_handle_that_can_be_awaited`.
+- Book chapter 12 ("Async I/O") gains a "Surface parity
+  (v1.22)" table mapping every new sync method to its async
+  wrapper, with the dispatch policy (`spawn_blocking` vs
+  inline) called out per row.
+
 ## [1.21.0] - 2026-05-04
 
 `Lattice::backup_to` produces a self-contained directory
