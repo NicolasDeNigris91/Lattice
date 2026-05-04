@@ -336,6 +336,17 @@ impl SSTableReader {
         &self.max_key
     }
 
+    /// File size of this `SSTable` in bytes, queried through the
+    /// open file handle so the answer is robust against the
+    /// inode being unlinked on POSIX (which happens to a snapshot
+    /// after a compaction unlinks the path; the snapshot still
+    /// keeps the inode alive via this open handle). Returns
+    /// `Ok(0)` if the OS refuses to report the size for any
+    /// reason; callers should treat the value as advisory.
+    pub(crate) fn file_size_bytes(&self) -> u64 {
+        self.file.lock().metadata().map_or(0, |m| m.len())
+    }
+
     #[allow(dead_code)]
     pub(crate) fn path(&self) -> &Path {
         &self.path

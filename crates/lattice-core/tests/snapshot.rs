@@ -172,3 +172,130 @@ fn snapshot_can_be_cloned() {
     assert_eq!(s1.get(b"k").unwrap(), Some(b"v".to_vec()));
     assert_eq!(s2.get(b"k").unwrap(), Some(b"v".to_vec()));
 }
+
+#[test]
+fn snapshot_scan_iter_streams_visible_pairs_in_key_order() {
+    // v1.24 lifts the streaming scan iterator from `Lattice`
+    // onto `Snapshot`. The contract is the same as
+    // `Lattice::scan_iter`: yield visible `(key, value)`
+    // pairs in ascending key order, optionally
+    // prefix-filtered, frozen at snapshot time.
+    let dir = tempdir().unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
+    db.put(b"alpha-01", b"1").unwrap();
+    db.put(b"alpha-02", b"2").unwrap();
+    db.put(b"beta-01", b"3").unwrap();
+    db.flush().unwrap();
+    db.put(b"alpha-03", b"4").unwrap();
+
+    let snap = db.snapshot();
+
+    // Mutate the source after the snapshot to confirm the
+    // iterator is frozen.
+    db.delete(b"alpha-01").unwrap();
+    db.put(b"gamma-01", b"5").unwrap();
+
+    let alphas: Vec<(Vec<u8>, Vec<u8>)> = snap
+        .scan_iter(Some(b"alpha"))
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        alphas,
+        vec![
+            (b"alpha-01".to_vec(), b"1".to_vec()),
+            (b"alpha-02".to_vec(), b"2".to_vec()),
+            (b"alpha-03".to_vec(), b"4".to_vec()),
+        ],
+    );
+
+    let all: Vec<(Vec<u8>, Vec<u8>)> = snap.scan_iter(None).collect::<Result<_, _>>().unwrap();
+    assert_eq!(all.len(), 4, "snapshot pinned 4 keys; got {all:?}");
+}
+
+#[test]
+fn snapshot_scan_range_yields_inclusive_exclusive_window() {
+    let dir = tempdir().unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
+    for i in 0u32..10 {
+        let key = format!("k{i:02}");
+        db.put(key.as_bytes(), i.to_le_bytes()).unwrap();
+    }
+
+    let snap = db.snapshot();
+
+    let pairs: Vec<(Vec<u8>, Vec<u8>)> = snap
+        .scan_range(Some(b"k03"), Some(b"k07"))
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let keys: Vec<Vec<u8>> = pairs.iter().map(|(k, _)| k.clone()).collect();
+    assert_eq!(
+        keys,
+        vec![
+            b"k03".to_vec(),
+            b"k04".to_vec(),
+            b"k05".to_vec(),
+            b"k06".to_vec(),
+        ],
+        "scan_range is inclusive-exclusive: k03..k07 should yield k03..k06",
+    );
+}
+
+#[test]
+fn snapshot_checksum_matches_lattice_checksum_at_snapshot_time() {
+    // v1.24 mirrors the v1.18 checksum onto Snapshot. The
+    // pinned contract is: snapshot.checksum() == lattice.checksum()
+    // captured at the moment of `db.snapshot()`, regardless of
+    // subsequent live mutations. This is the temporal
+    // counterpart of the cross-host divergence-detection
+    // contract: same logical state at time T produces the same
+    // hash, even if the live tree has moved on by the time the
+    // hash is computed.
+    let dir = tempdir().unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
+    for i in 0u32..20 {
+        let key = format!("k{i:02}");
+        db.put(key.as_bytes(), format!("v{i:02}").as_bytes())
+            .unwrap();
+    }
+    db.flush().unwrap();
+
+    let live_at_t = db.checksum().unwrap();
+    let snap = db.snapshot();
+    assert_eq!(snap.checksum().unwrap(), live_at_t);
+
+    // After mutating the live tree, the snapshot's checksum
+    // must stay frozen. The live tree's checksum diverges.
+    db.put(b"k00", b"changed").unwrap();
+    db.delete(b"k01").unwrap();
+    db.put(b"new", b"x").unwrap();
+
+    assert_eq!(
+        snap.checksum().unwrap(),
+        live_at_t,
+        "snapshot checksum must be frozen at snapshot time",
+    );
+    assert_ne!(
+        db.checksum().unwrap(),
+        live_at_t,
+        "live tree checksum must reflect post-snapshot mutations",
+    );
+}
+
+#[test]
+fn snapshot_byte_size_on_disk_reports_pinned_sstable_bytes() {
+    let dir = tempdir().unwrap();
+    let db = Lattice::open(dir.path()).unwrap();
+    for i in 0u32..30 {
+        let key = format!("k{i:02}");
+        db.put(key.as_bytes(), [b'v'; 256]).unwrap();
+    }
+    db.flush().unwrap();
+
+    let snap = db.snapshot();
+    let size = snap.byte_size_on_disk();
+
+    assert!(
+        size > 0,
+        "snapshot pinning at least one SSTable should report positive bytes",
+    );
+}

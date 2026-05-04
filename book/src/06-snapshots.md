@@ -81,3 +81,43 @@ disk usage is briefly bloated.
 - Not free. Cloning the memtable allocates per-key memory.
 
 [snapshot]: https://github.com/NicolasDeNigris91/Lattice/blob/main/crates/lattice-core/src/snapshot.rs
+
+## Surface parity (v1.24)
+
+Through v1.23 the `Snapshot` API exposed only `get` and the
+materialising `scan`. v1.24 brings the v1.12 streaming and
+v1.18 inventory primitives onto the snapshot type so callers
+who already pin a point-in-time view can answer the same
+questions they ask of `Lattice` without re-opening the
+database:
+
+| `Lattice` method                  | `Snapshot` mirror                         | notes                                                                                  |
+|-----------------------------------|-------------------------------------------|----------------------------------------------------------------------------------------|
+| `Lattice::scan_iter(prefix)`      | `Snapshot::scan_iter(prefix)`             | Same `BinaryHeap` k-way merge; one frontier entry per pinned tier.                     |
+| `Lattice::scan_range(start, end)` | `Snapshot::scan_range(start, end)`        | Inclusive-exclusive bounds, frozen at snapshot time.                                   |
+| `Lattice::checksum()`             | `Snapshot::checksum()`                    | Pinned at snapshot time; subsequent live mutations cannot perturb the value.           |
+| `Lattice::byte_size_on_disk()`    | `Snapshot::byte_size_on_disk()`           | Queries each pinned reader's file size via the open handle, not the path.              |
+
+The `Snapshot::byte_size_on_disk` implementation goes through
+`SSTableReader::file_size_bytes`, which calls `metadata` on
+the reader's open file handle rather than on the on-disk path.
+Path-based queries would race with a concurrent compaction
+that unlinks the live tree's reference; the open-handle
+approach reports the correct size as long as the snapshot
+holds the reader alive, which is the lifetime contract
+already.
+
+`Snapshot::checksum` reuses the new `Snapshot::scan_iter`
+under the hood, so the temporal counterpart of the
+cross-host divergence-detection contract is one call away:
+two snapshots of the same logical state agree on the hash,
+regardless of whether either was taken from the same
+`Lattice` handle, and the live tree's checksum may diverge
+in the meantime without affecting the snapshot's value.
+
+The pinned tests in `tests/snapshot.rs`
+(`snapshot_scan_iter_streams_visible_pairs_in_key_order`,
+`snapshot_scan_range_yields_inclusive_exclusive_window`,
+`snapshot_checksum_matches_lattice_checksum_at_snapshot_time`,
+`snapshot_byte_size_on_disk_reports_pinned_sstable_bytes`)
+cover each new method against its frozen-state contract.
