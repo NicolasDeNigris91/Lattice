@@ -150,6 +150,50 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - No version bump. Pure infrastructure; the next feature
   release rolls these in.
 
+## [1.24.0] - 2026-05-04
+
+`Snapshot` surface parity. The point-in-time view type
+historically exposed only `get` and the materialising `scan`;
+v1.24 brings the v1.12 streaming iterator and the v1.18
+inventory/fingerprinting primitives onto `Snapshot` so a
+caller who already pinned a moment in time can answer the
+same questions they ask of `Lattice` without re-opening.
+
+### Added
+- `Snapshot::scan_iter(prefix) -> ScanIter`. Streaming
+  counterpart of `Snapshot::scan`, frozen at snapshot time.
+  Same `BinaryHeap` k-way merge as `Lattice::scan_iter`, so
+  the memory cost is one frontier entry per pinned tier.
+- `Snapshot::scan_range(start, end) -> ScanIter`. Range-
+  bounded streaming scan over the snapshot's pinned state.
+  Bounds are inclusive-exclusive (`[start, end)`), matching
+  `Lattice::scan_range`.
+- `Snapshot::checksum() -> Result<u64>`. Temporal counterpart
+  of `Lattice::checksum`: pinned at snapshot time and
+  invariant under any subsequent live mutation, so two
+  snapshots of the same logical state produce the same
+  fingerprint regardless of where each was taken from.
+- `Snapshot::byte_size_on_disk() -> u64`. Sum of the pinned
+  `SSTable`s' on-disk byte counts. Queries each reader's
+  file size via the open handle (`SSTableReader::file_size_bytes`)
+  rather than the path, so the answer is robust against a
+  concurrent compaction that unlinks the live tree's
+  reference.
+- Internal `SSTableReader::file_size_bytes` accessor for the
+  open-handle-based size query.
+- Four new tests in `tests/snapshot.rs`:
+  `snapshot_scan_iter_streams_visible_pairs_in_key_order`,
+  `snapshot_scan_range_yields_inclusive_exclusive_window`,
+  `snapshot_checksum_matches_lattice_checksum_at_snapshot_time`
+  (pins the temporal divergence-detection contract: a
+  snapshot's hash equals the live tree's hash at snapshot
+  creation, and stays frozen thereafter), and
+  `snapshot_byte_size_on_disk_reports_pinned_sstable_bytes`.
+- Book chapter 6 ("Snapshots") gains a "Surface parity
+  (v1.24)" section with a table mapping each `Lattice`
+  method to its `Snapshot` mirror, the open-handle rationale
+  for `byte_size_on_disk`, and a pointer to the test fence.
+
 ## [1.23.0] - 2026-05-04
 
 `lattice` CLI gains an operational subcommand set covering
