@@ -150,6 +150,43 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - No version bump. Pure infrastructure; the next feature
   release rolls these in.
 
+## [1.20.0] - 2026-05-04
+
+Bounded `CompactionHandle::wait`. The new
+`wait_timeout(Duration)` returns `Ok(true)` once the round
+completes, `Ok(false)` if the deadline elapses first, and
+`Err(Error::Compaction(...))` on a sticky failure, closing
+the gap between fire-and-forget compaction and "I need to
+know within N seconds". Tests, ops dashboards, and async
+wrappers all reach for the bounded variant first.
+
+### Added
+- `CompactionHandle::wait_timeout(Duration) -> Result<bool>`
+  on the public API. Consumes the handle (matching `wait`);
+  a caller that needs to retry schedules a fresh handle via
+  `Lattice::compact_async`.
+- `CompactorShared::wait_for_timeout(target, timeout)`
+  internal helper. Rides `parking_lot::Condvar::wait_for` and
+  folds spurious wake-ups into a deadline-aware loop: each
+  iteration recomputes the remaining time against an absolute
+  `Instant + timeout` deadline, so the caller always sees at
+  most one wait of `timeout`.
+- Loom variant of `wait_for_timeout` against
+  `loom::sync::Condvar::wait_timeout`. The loom suite under
+  `lattice-loom-tests` continues to compile and drive the
+  same state machine the production path uses.
+- Two internal-mod tests in `lib.rs` pin both branches:
+  `compaction_handle_wait_timeout_returns_true_when_round_completes`
+  on a real `compact_async` round with a generous deadline,
+  and
+  `compaction_handle_wait_timeout_returns_false_when_deadline_elapses`
+  with a synthetic handle whose target generation cannot be
+  reached (`u64::MAX`) so the wait must observe the deadline
+  rather than block forever.
+- Book chapter 5 ("Compaction") gains a "Bounded waits
+  (v1.20)" section with the contract, the spurious-wake-up
+  handling, and the link to the new test pair.
+
 ## [1.19.0] - 2026-05-04
 
 Asynchronous auto-compaction with backpressure. Through v1.18
