@@ -142,3 +142,44 @@ The chapter-5 migration applies regardless of which API a
 caller uses: `Lattice::flush` and `AsyncLattice::flush` both
 ride the same fire-and-forget trigger. The async wrapper
 gains the win for free.
+
+## Surface parity (v1.22)
+
+Through v1.21 the async wrapper exposed only the call set
+that existed at v1.5: open, put, delete, get, scan, flush,
+flush_wal, compact, transaction, sync. The synchronous
+engine grew several read-only and ops methods between v1.18
+and v1.21 (inventory, fingerprinting, backup, bounded
+compaction wait); v1.22 pulls them all into `AsyncLattice`
+so a tokio caller never has to drop down to `.sync()` for
+the new surface.
+
+| sync method                          | async wrapper                              | dispatch                                                   |
+|--------------------------------------|--------------------------------------------|------------------------------------------------------------|
+| `Lattice::byte_size_on_disk`         | `AsyncLattice::byte_size_on_disk`          | `spawn_blocking` (per-file `metadata` syscalls)           |
+| `Lattice::checksum`                  | `AsyncLattice::checksum`                   | `spawn_blocking` (full merge scan)                         |
+| `Lattice::backup_to`                 | `AsyncLattice::backup_to`                  | `spawn_blocking` (file copies + WAL replay + dirent fsync) |
+| `Lattice::stats`                     | `AsyncLattice::stats`                      | inline (one read lock + a handful of atomics)              |
+| `Lattice::config`                    | `AsyncLattice::config`                     | inline (one struct build, no locks)                        |
+| `Lattice::path`                      | `AsyncLattice::path`                       | inline (field access)                                      |
+| `Lattice::compact_async`             | `AsyncLattice::compact_async`              | inline (just bumps the generation counter)                 |
+| `CompactionHandle::wait`             | `AsyncLattice::wait_compact`               | `spawn_blocking` (condvar wait)                            |
+| `CompactionHandle::wait_timeout`     | `AsyncLattice::wait_compact_timeout`       | `spawn_blocking` (deadline-aware condvar wait)             |
+
+The dispatch column is load-bearing: cheap in-memory reads
+(stats, config, path, compact_async) run on the calling
+tokio task to avoid the round-trip cost of
+`spawn_blocking`; everything that touches disk or blocks on
+a condvar goes through the blocking pool so the executor
+stays responsive.
+
+The contract tests in `tests/async_api.rs`
+(`async_byte_size_on_disk_grows_after_flush`,
+`async_checksum_matches_sync_handle`,
+`async_backup_to_produces_openable_directory`,
+`async_stats_and_config_are_cheap_inline_reads`,
+`async_compact_async_returns_a_handle_that_can_be_awaited`)
+pin the new surface against the same invariants the sync
+engine ships, including the cross-host divergence-detection
+hash equality and the backup's openability via
+`Lattice::open`.

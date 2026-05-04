@@ -10,9 +10,10 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::Lattice;
+use crate::compactor::CompactionHandle;
 use crate::error::{Error, Result};
 use crate::transaction::Transaction;
+use crate::{Config, Lattice, Stats};
 
 /// Async-friendly wrapper around [`Lattice`].
 ///
@@ -128,6 +129,105 @@ impl AsyncLattice {
     {
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || inner.transaction(f))
+            .await
+            .map_err(join_to_err)?
+    }
+
+    /// Total bytes the engine currently occupies on disk:
+    /// the sum of every live `SSTable` file size plus the
+    /// current WAL length. Async wrapper for
+    /// [`Lattice::byte_size_on_disk`]; runs the per-file
+    /// `metadata` calls on tokio's blocking pool. Memtable
+    /// bytes are not counted; for that, see [`Self::stats`].
+    pub async fn byte_size_on_disk(&self) -> Result<u64> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || inner.byte_size_on_disk())
+            .await
+            .map_err(join_to_err)?
+    }
+
+    /// Deterministic xxh3-64 fingerprint of the visible
+    /// `(key, value)` set in ascending key order. Async
+    /// wrapper for [`Lattice::checksum`]; runs the merge
+    /// scan on tokio's blocking pool. Two replicas on the
+    /// same logical state produce the same value, regardless
+    /// of how each got there.
+    pub async fn checksum(&self) -> Result<u64> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || inner.checksum())
+            .await
+            .map_err(join_to_err)?
+    }
+
+    /// Copy this database into `dest` as a self-contained
+    /// directory openable by [`Self::open`]. Async wrapper
+    /// for [`Lattice::backup_to`]; the heavy file copies and
+    /// WAL replay run on tokio's blocking pool so the
+    /// calling task stays free.
+    pub async fn backup_to(&self, dest: impl AsRef<Path>) -> Result<()> {
+        let inner = self.inner.clone();
+        let dest: PathBuf = dest.as_ref().to_path_buf();
+        tokio::task::spawn_blocking(move || inner.backup_to(dest))
+            .await
+            .map_err(join_to_err)?
+    }
+
+    /// Operational counters snapshot. Cheap (one read lock
+    /// plus a handful of atomic loads), so it runs inline on
+    /// the calling tokio task rather than going through the
+    /// blocking pool.
+    #[must_use]
+    pub fn stats(&self) -> Stats {
+        self.inner.stats()
+    }
+
+    /// Effective runtime configuration. Cheap (one struct
+    /// build, no locks); runs inline on the calling task.
+    #[must_use]
+    pub fn config(&self) -> Config {
+        self.inner.config()
+    }
+
+    /// Path to the database directory. Cheap field access;
+    /// runs inline on the calling task.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        self.inner.path()
+    }
+
+    /// Schedule a leveled compaction round on the background
+    /// compactor and return the handle. Inline (no
+    /// `spawn_blocking`): the call only bumps a generation
+    /// counter and notifies the worker. Use
+    /// [`Self::wait_compact`] to await the result without
+    /// blocking the calling task.
+    #[must_use]
+    pub fn compact_async(&self) -> CompactionHandle {
+        self.inner.compact_async()
+    }
+
+    /// Await a previously scheduled compaction round. The
+    /// underlying [`CompactionHandle::wait`] is blocking, so
+    /// the call goes through tokio's blocking pool to keep
+    /// the calling task free.
+    pub async fn wait_compact(&self, handle: CompactionHandle) -> Result<()> {
+        tokio::task::spawn_blocking(move || handle.wait())
+            .await
+            .map_err(join_to_err)?
+    }
+
+    /// Bounded variant of [`Self::wait_compact`]. Returns
+    /// `Ok(true)` if the round completed within `timeout`,
+    /// `Ok(false)` if the deadline elapsed first, and
+    /// `Err(Error::Compaction(...))` on a sticky failure.
+    /// Mirrors [`crate::CompactionHandle::wait_timeout`] for
+    /// async callers.
+    pub async fn wait_compact_timeout(
+        &self,
+        handle: CompactionHandle,
+        timeout: std::time::Duration,
+    ) -> Result<bool> {
+        tokio::task::spawn_blocking(move || handle.wait_timeout(timeout))
             .await
             .map_err(join_to_err)?
     }
