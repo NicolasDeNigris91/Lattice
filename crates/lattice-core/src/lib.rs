@@ -239,6 +239,10 @@ pub struct Config {
     /// Number of live `SSTable`s in a single level that triggers
     /// auto-compaction. See [`LatticeBuilder::compaction_threshold`].
     pub compaction_threshold: usize,
+    /// Level depth at which an auto-flush blocks the writer until
+    /// the latest scheduled compaction completes. See
+    /// [`LatticeBuilder::compaction_high_water_mark`].
+    pub compaction_high_water_mark: usize,
     /// Maximum time a non-durable write may sit in the WAL buffer
     /// before the background flusher syncs it. See
     /// [`LatticeBuilder::commit_window`].
@@ -273,6 +277,7 @@ pub struct LatticeBuilder {
     path: PathBuf,
     flush_threshold_bytes: usize,
     compaction_threshold: usize,
+    compaction_high_water_mark: usize,
     commit_window: Duration,
     commit_batch: usize,
 }
@@ -291,6 +296,25 @@ impl LatticeBuilder {
     #[must_use]
     pub const fn compaction_threshold(mut self, tables: usize) -> Self {
         self.compaction_threshold = tables;
+        self
+    }
+
+    /// Set the level depth at which an auto-flush blocks the
+    /// writer until the latest scheduled compaction completes.
+    /// Default is `4 * compaction_threshold`. Below the
+    /// high-water mark, auto-compaction is fire-and-forget on
+    /// the background compactor thread; once any level reaches
+    /// the mark, the next flush waits on the in-flight
+    /// compaction generation before returning.
+    ///
+    /// Lower values smooth tail latency at the cost of
+    /// throughput (writers stall sooner); higher values let
+    /// short bursts run flat-out while bounding worst-case
+    /// level depth. Use [`usize::MAX`] to disable backpressure
+    /// entirely (writers never wait, level depth is unbounded).
+    #[must_use]
+    pub const fn compaction_high_water_mark(mut self, mark: usize) -> Self {
+        self.compaction_high_water_mark = mark;
         self
     }
 
@@ -331,6 +355,17 @@ const DEFAULT_FLUSH_THRESHOLD_BYTES: usize = 4 * 1024 * 1024;
 /// auto-compaction is triggered for that level. Tunable via
 /// [`LatticeBuilder::compaction_threshold`].
 const DEFAULT_COMPACTION_THRESHOLD: usize = 4;
+
+/// Default level depth at which an auto-flush blocks the writer
+/// until the latest scheduled compaction completes. v1.19's
+/// async auto-compaction would otherwise let level depth grow
+/// unbounded under a runaway producer; the high-water mark is
+/// the throughput-vs-tail-latency knob. Default is `4 *
+/// DEFAULT_COMPACTION_THRESHOLD = 16` so a healthy compactor
+/// has room to keep up with normal bursts before any writer
+/// stalls. Tunable via
+/// [`LatticeBuilder::compaction_high_water_mark`].
+const DEFAULT_COMPACTION_HIGH_WATER_MARK: usize = 4 * DEFAULT_COMPACTION_THRESHOLD;
 
 /// Maximum LSM level depth. The leveled algorithm stops cascading
 /// once it reaches this depth; in practice the dataset would have
@@ -409,6 +444,10 @@ struct Inner {
     mutation_lock: Mutex<()>,
     flush_threshold_bytes: usize,
     compaction_threshold: usize,
+    /// Level depth at which an auto-flush blocks the writer until
+    /// the latest scheduled compaction completes (v1.19
+    /// backpressure). Default is `4 * compaction_threshold`.
+    compaction_high_water_mark: usize,
     commit_batch: usize,
     /// Mirror of the builder's `commit_window` value so
     /// [`Lattice::config`] can return it. The flusher thread
@@ -589,6 +628,7 @@ impl Lattice {
             path: path.as_ref().to_path_buf(),
             flush_threshold_bytes: DEFAULT_FLUSH_THRESHOLD_BYTES,
             compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
+            compaction_high_water_mark: DEFAULT_COMPACTION_HIGH_WATER_MARK,
             commit_window: DEFAULT_COMMIT_WINDOW,
             commit_batch: DEFAULT_COMMIT_BATCH,
         }
@@ -628,6 +668,7 @@ impl Lattice {
             path,
             flush_threshold_bytes,
             compaction_threshold,
+            compaction_high_water_mark,
             commit_window,
             commit_batch,
         } = builder;
@@ -691,6 +732,7 @@ impl Lattice {
             mutation_lock: Mutex::new(()),
             flush_threshold_bytes,
             compaction_threshold,
+            compaction_high_water_mark,
             commit_batch,
             commit_window,
             flusher_stop: AtomicBool::new(false),
@@ -1015,6 +1057,25 @@ impl Lattice {
 
     /// Flush the current memtable to a new on-disk `SSTable`, then
     /// truncate the WAL. No-op if the memtable is empty.
+    ///
+    /// If the new `SSTable` lifts a level above
+    /// [`LatticeBuilder::compaction_threshold`], an
+    /// auto-compaction is scheduled on the dedicated background
+    /// thread (since v1.19; pre-v1.19 the round ran inline on
+    /// the writer's thread). Below
+    /// [`LatticeBuilder::compaction_high_water_mark`] the
+    /// scheduled round is fire-and-forget and `flush` returns
+    /// immediately; once any level reaches the high-water mark
+    /// the writer blocks on the in-flight compaction generation
+    /// before returning, so level depth stays bounded.
+    ///
+    /// Tests that need a deterministic post-flush LSM layout
+    /// should follow the flush with [`Self::compact`], which
+    /// blocks until every level holds at most one `SSTable`.
+    /// Errors from a background compaction are *not* propagated
+    /// out of `flush`; they surface on the next [`Self::compact`]
+    /// or [`CompactionHandle::wait`] call (and are emitted as
+    /// `tracing::warn` events in real time).
     #[instrument(level = "info", skip(self))]
     pub fn flush(&self) -> Result<()> {
         let started = Instant::now();
@@ -1404,6 +1465,7 @@ impl Lattice {
         Config {
             flush_threshold_bytes: self.inner.flush_threshold_bytes,
             compaction_threshold: self.inner.compaction_threshold,
+            compaction_high_water_mark: self.inner.compaction_high_water_mark,
             commit_window: self.inner.commit_window,
             commit_batch: self.inner.commit_batch,
         }
@@ -1650,32 +1712,64 @@ impl Lattice {
     }
 
     fn maybe_compact(&self) -> Result<()> {
-        // Auto-compaction picks the shallowest level above the
-        // per-level threshold and runs one round inline on the
-        // writer's thread. Cascading happens gradually: each
-        // subsequent flush re-checks and runs the next round if
-        // the cascade overflowed. This keeps the writer's
-        // worst-case latency bounded by a single round.
+        // Auto-compaction is asynchronous since v1.19. When a
+        // flush leaves a level above its threshold, this method
+        // schedules a round on the dedicated compactor thread
+        // and returns immediately; the writer's tail latency no
+        // longer pays the merge cost.
         //
-        // Pre-v1.13 the user-facing `compact()` did the same; v1.13
-        // adds [`Self::compact_async`] for callers that want
-        // non-blocking compaction. Auto-compaction stays inline so
-        // a fresh `Lattice::open` followed by `flush` leaves the
-        // database in a deterministically settled state, which the
-        // existing integration tests (and many user reopens) rely
-        // on. Callers running heavy write workloads can disable
-        // implicit auto-compaction (a v2.x feature) and drive
-        // `compact_async` from their own scheduler.
-        let target = {
+        // Through v1.18 the trigger was inline on the writer
+        // thread, which kept post-flush state deterministic but
+        // bounded throughput by the compaction wall-clock. The
+        // worker captures the latest scheduled generation when
+        // it wakes and runs `run_pending_compactions` to drain
+        // every level above the threshold, so a burst of
+        // back-to-back flushes coalesces into one cascade.
+        //
+        // Errors from the round are sticky on `CompactorShared`
+        // and surface on the next [`Self::compact`] /
+        // [`Self::compact_async`] wait. They are not propagated
+        // out of `flush` because doing so would re-couple writer
+        // latency to compaction errors, defeating the migration.
+        // The compactor thread also emits a
+        // `tracing::warn` event on failure, so a tracing
+        // subscriber sees them in real time.
+        //
+        // Backpressure: when the shallowest level's depth
+        // crosses [`LatticeBuilder::compaction_high_water_mark`]
+        // (default `4 * compaction_threshold`), the writer
+        // blocks on the latest scheduled compaction generation
+        // before continuing. This keeps a runaway producer from
+        // letting level depth grow unbounded while the compactor
+        // catches up.
+        let (needs_round, hit_high_water) = {
             let state = self.inner.state.read();
-            state
+            let position = state
                 .levels
                 .iter()
                 .position(|level| level.len() >= self.inner.compaction_threshold)
-                .filter(|&idx| idx + 1 < MAX_LEVELS)
+                .filter(|&idx| idx + 1 < MAX_LEVELS);
+            let max_depth = state.levels.iter().map(Vec::len).max().unwrap_or(0);
+            let result = (
+                position.is_some(),
+                max_depth >= self.inner.compaction_high_water_mark,
+            );
+            drop(state);
+            result
         };
-        if let Some(idx) = target {
-            self.compact_level(idx)?;
+        if needs_round {
+            let handle = self.compact_async();
+            if hit_high_water {
+                // Backpressure: the producer is outrunning the
+                // compactor. Block this flush on the round we
+                // just scheduled. Subsequent rounds are still
+                // fire-and-forget; only the over-water flush
+                // pays the wait.
+                handle.wait()?;
+            }
+            // Otherwise drop the handle: the worker still runs
+            // the round, and any error surfaces on a later
+            // explicit compact_async().wait().
         }
         Ok(())
     }

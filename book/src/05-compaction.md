@@ -318,3 +318,64 @@ clears the slot. Sticky errors mean a single transient I/O
 failure surfaces to the next caller instead of disappearing
 into a worker thread, which matches the long-standing
 behaviour of the foreground path.
+
+Async auto-compaction with backpressure (v1.19)
+-----------------------------------------------
+
+Through v1.18 the auto-compaction trigger inside `flush()`
+ran inline on the writer thread: a flush that lifted a level
+above its threshold paid the full compaction wall clock
+before returning. The contract was simple and the post-flush
+state was deterministic, but the writer's tail latency
+tracked the merge cost, and a steady producer could not
+overlap WAL appends with compaction I/O.
+
+v1.19 hoists the auto-trigger onto the same background
+compactor that `Lattice::compact_async` already used. The
+flush now reads its post-install LSM state, schedules a
+round if any level crosses
+[`LatticeBuilder::compaction_threshold`], drops the
+[`CompactionHandle`], and returns. The compactor thread runs
+`run_pending_compactions` to drain every level above the
+threshold, the same routine the foreground `compact()` calls.
+Errors from the round are sticky on `CompactorShared` and
+surface on the next user-driven
+`compact()` / `compact_async().wait()`; they are not
+propagated out of `flush` because doing so would re-couple
+writer latency to compaction errors, which is exactly the
+coupling the migration removed. The compactor thread also
+emits a `tracing::warn` event on failure, so a tracing
+subscriber sees them in real time.
+
+Without a brake, a producer that outruns the compactor would
+let level depth grow unbounded. v1.19 adds a high-water mark:
+[`LatticeBuilder::compaction_high_water_mark`] (default
+`4 * compaction_threshold`). Below the mark, the auto-trigger
+is fire-and-forget; once any level reaches the mark, the
+next flush waits on its scheduled compaction generation
+before returning. Subsequent flushes resume the
+fire-and-forget path until the level depth drops back below
+the mark. The knob trades throughput for tail-latency: low
+values smooth tails by stalling sooner; high values let
+short bursts run flat-out while bounding worst-case depth.
+`usize::MAX` disables backpressure.
+
+The behavioural test fence
+`auto_compaction_runs_on_background_thread_after_flush_returns`
+in `tests/stats.rs` constructs a `compaction_threshold = 2`
+database with backpressure off, drives twenty flushes, calls
+`compact()` to settle, and asserts every key reads back to
+its written value. The historical
+`compaction_state_survives_reopen` integration test relaxes
+its file-count assertion from `== 1` to `>= 1`: the
+asynchronous trigger now runs the full
+`run_pending_compactions` cascade on each scheduled round
+rather than the legacy single-level inline trigger, so the
+final layout can spread across more levels than the
+sync algorithm produced. The load-bearing contract was always
+that data survives reopen, not the precise on-disk layout.
+
+The migration is complementary to the v1.17 strict-leveled
+rewrite: strict-leveled cuts write amplification on a single
+round; v1.19 lets the compactor consume that win in real
+time without holding up the writer.

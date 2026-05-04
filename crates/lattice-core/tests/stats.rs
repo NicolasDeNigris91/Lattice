@@ -116,6 +116,7 @@ fn config_reports_builder_values_after_open() {
     let db = Lattice::builder(dir.path())
         .flush_threshold_bytes(1024 * 16)
         .compaction_threshold(7)
+        .compaction_high_water_mark(33)
         .commit_window(Duration::from_millis(42))
         .commit_batch(99)
         .open()
@@ -124,6 +125,7 @@ fn config_reports_builder_values_after_open() {
     let config = db.config();
     assert_eq!(config.flush_threshold_bytes, 1024 * 16);
     assert_eq!(config.compaction_threshold, 7);
+    assert_eq!(config.compaction_high_water_mark, 33);
     assert_eq!(config.commit_window, Duration::from_millis(42));
     assert_eq!(config.commit_batch, 99);
 
@@ -133,8 +135,52 @@ fn config_reports_builder_values_after_open() {
     let default_config = db2.config();
     assert!(default_config.flush_threshold_bytes > 0);
     assert!(default_config.compaction_threshold > 0);
+    // The high-water mark default is anchored at 4x the
+    // compaction_threshold so a healthy compactor has room
+    // to keep up with normal bursts before any writer stalls.
+    assert!(
+        default_config.compaction_high_water_mark >= default_config.compaction_threshold,
+        "high-water mark must be at least as deep as the trigger threshold; got {default_config:?}",
+    );
     assert!(default_config.commit_batch > 0);
     assert!(default_config.commit_window > Duration::from_secs(0));
+}
+
+#[test]
+fn auto_compaction_runs_on_background_thread_after_flush_returns() {
+    // v1.19 contract: a flush that crosses the auto-compaction
+    // threshold schedules the round on the background
+    // compactor and returns immediately. Behaviourally, the
+    // user observes that flushes complete promptly, the
+    // database eventually converges (after `compact()` blocks
+    // on the last-scheduled generation), and reads are
+    // correct throughout. Without backpressure (high-water
+    // mark = usize::MAX) the test should never block on
+    // compaction.
+    let dir = tempdir().unwrap();
+    let db = Lattice::builder(dir.path())
+        .compaction_threshold(2)
+        .compaction_high_water_mark(usize::MAX)
+        .open()
+        .unwrap();
+
+    for i in 0u32..20 {
+        let key = format!("k{i:04}");
+        db.put(key.as_bytes(), format!("v{i}").as_bytes()).unwrap();
+        db.flush().unwrap();
+    }
+    // compact() is the agreed-upon barrier: it blocks until
+    // every scheduled compaction generation completes.
+    db.compact().unwrap();
+
+    for i in 0u32..20 {
+        let key = format!("k{i:04}");
+        assert_eq!(
+            db.get(key.as_bytes()).unwrap().as_deref(),
+            Some(format!("v{i}").as_bytes()),
+            "key {key} missing after async auto-compaction cascade",
+        );
+    }
 }
 
 #[test]

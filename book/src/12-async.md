@@ -120,3 +120,25 @@ only when the feature is on:
   present after the joins.
 
 Run with `cargo test -p lattice-core --features tokio`.
+
+## Auto-compaction is async (v1.19)
+
+The `AsyncLattice` wrapper is one half of the async story. The
+other is auto-compaction itself. Through v1.18 a flush that
+crossed [`LatticeBuilder::compaction_threshold`] ran the
+merge inline on the writer thread; from v1.19 the same trigger
+schedules a round on the dedicated compactor thread and
+returns immediately. The writer's tail latency no longer pays
+the compaction wall-clock under bursts; the I/O happens in
+parallel with the next WAL appends, and the synchronous
+`Lattice::compact()` keeps its blocking semantics for callers
+that need a deterministic post-call layout. See chapter 5 for
+the algorithm and the
+[`LatticeBuilder::compaction_high_water_mark`] backpressure
+knob, which keeps a runaway producer from letting level depth
+grow unbounded while the compactor catches up.
+
+The chapter-5 migration applies regardless of which API a
+caller uses: `Lattice::flush` and `AsyncLattice::flush` both
+ride the same fire-and-forget trigger. The async wrapper
+gains the win for free.
