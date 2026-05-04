@@ -49,6 +49,8 @@ scope**.
 |---|---|---|
 | `forbid(unsafe_code)` on the engine | shipped | Audited by clippy strict on every PR. |
 | Decoder hardening | shipped | Three cargo-fuzz targets exercise the WAL, SSTable, and manifest parsers against malformed input. |
+| Book-deploy headers | shipped (v1.26) | The static book deploy (`deploy/Caddyfile`) carries `X-Frame-Options DENY`, a same-origin Content-Security-Policy with `'unsafe-inline'` for the mdBook theme, `Cross-Origin-Opener-Policy same-origin`, and `Cross-Origin-Resource-Policy same-origin` on top of the existing HSTS, Referrer-Policy, X-Content-Type-Options, and Permissions-Policy headers. |
+| Container health probe | shipped (v1.26) | `deploy/Dockerfile` HEALTHCHECK polls the served root every 30 seconds via `wget --spider`; an orchestrator that drops the process can spot a wedge and recycle without the application having to expose a separate `/health` endpoint. |
 | Encryption at rest | out of scope (v2.x) | Design sketch in chapter 15. |
 | Encryption in transit | not applicable | Lattice does not open sockets. |
 | Per-tenant isolation | not applicable | Single-process embedded library. |

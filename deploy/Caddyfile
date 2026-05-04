@@ -22,6 +22,17 @@
 		Referrer-Policy strict-origin-when-cross-origin
 		Permissions-Policy "interest-cohort=()"
 		Strict-Transport-Security "max-age=63072000; includeSubDomains"
+
+		# v1.26 deploy hardening. The book is a static mdBook
+		# site, so the threat surface is narrow but worth
+		# pinning explicitly. CSP locks scripts and styles to
+		# the same origin; X-Frame-Options blocks framing-based
+		# clickjacking. COOP / CORP keep the page isolated from
+		# cross-origin window references.
+		X-Frame-Options DENY
+		Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		Cross-Origin-Opener-Policy same-origin
+		Cross-Origin-Resource-Policy same-origin
 	}
 
 	@static {
