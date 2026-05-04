@@ -314,4 +314,116 @@ mod tests {
         let opened = cipher.open(&nonce, b"aad", &sealed).unwrap();
         assert!(opened.is_empty());
     }
+
+    // Property fence: 64 random op shapes per `cargo test`,
+    // generalising the eight unit tests above. The unit tests
+    // pin specific contracts at handpicked seeds; the property
+    // tests sweep arbitrary keys, nonces, AAD strings, and
+    // payloads to catch any seed-dependent regression future
+    // phases might introduce when the cipher gets wired through
+    // the SSTable, WAL, and manifest paths.
+    use proptest::prelude::*;
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config {
+            cases: 64,
+            .. proptest::test_runner::Config::default()
+        })]
+
+        /// Round-trip property: for arbitrary key / nonce / AAD /
+        /// plaintext, sealing and opening yields the exact input
+        /// payload. Larger payload range than the unit test so
+        /// the proptest exercises multiple cipher block boundaries.
+        #[test]
+        fn proptest_round_trip_under_arbitrary_inputs(
+            k in proptest::array::uniform32(any::<u8>()),
+            n in proptest::array::uniform24(any::<u8>()),
+            aad in proptest::collection::vec(any::<u8>(), 0..256),
+            plaintext in proptest::collection::vec(any::<u8>(), 0..4096),
+        ) {
+            let cipher = Cipher::new(k);
+            let sealed = cipher.seal(&n, &aad, &plaintext);
+            let opened = cipher.open(&n, &aad, &sealed).unwrap();
+            prop_assert_eq!(opened, plaintext);
+        }
+
+        /// Bit-flip property: for arbitrary inputs, flipping
+        /// any single bit anywhere inside the sealed payload
+        /// (ciphertext or tag) MUST fail authentication. This
+        /// is the chapter-19 swapped-block / tampering contract
+        /// generalised across the input space.
+        #[test]
+        fn proptest_any_bit_flip_fails_authentication(
+            k in proptest::array::uniform32(any::<u8>()),
+            n in proptest::array::uniform24(any::<u8>()),
+            aad in proptest::collection::vec(any::<u8>(), 0..64),
+            plaintext in proptest::collection::vec(any::<u8>(), 1..512),
+            byte_pick in any::<prop::sample::Index>(),
+            bit in 0u8..8,
+        ) {
+            let cipher = Cipher::new(k);
+            let mut sealed = cipher.seal(&n, &aad, &plaintext);
+            let byte_idx = byte_pick.index(sealed.len());
+            sealed[byte_idx] ^= 1 << bit;
+            prop_assert!(
+                cipher.open(&n, &aad, &sealed).is_err(),
+                "tampering at byte {} bit {} must fail",
+                byte_idx,
+                bit,
+            );
+        }
+
+        /// Wrong-key property: for arbitrary inputs, opening a
+        /// sealed payload with a different key MUST fail. The
+        /// generated keys are constrained to differ in at least
+        /// one bit so the test does not occasionally exercise
+        /// the round-trip path under a degenerate "different
+        /// keys are equal" sample.
+        #[test]
+        fn proptest_wrong_key_fails_authentication(
+            writer_key in proptest::array::uniform32(any::<u8>()),
+            mut reader_key in proptest::array::uniform32(any::<u8>()),
+            n in proptest::array::uniform24(any::<u8>()),
+            aad in proptest::collection::vec(any::<u8>(), 0..64),
+            plaintext in proptest::collection::vec(any::<u8>(), 0..256),
+            flip_byte in 0usize..32,
+            flip_bit in 0u8..8,
+        ) {
+            // Force the reader key to differ from the writer key
+            // by toggling one chosen bit.
+            reader_key[flip_byte] ^= 1 << flip_bit;
+            if reader_key == writer_key {
+                // The toggle restored equality somehow; flip an
+                // unambiguous byte instead.
+                reader_key[0] ^= 0xFF;
+            }
+            prop_assume!(reader_key != writer_key);
+
+            let writer = Cipher::new(writer_key);
+            let reader = Cipher::new(reader_key);
+            let sealed = writer.seal(&n, &aad, &plaintext);
+
+            prop_assert!(reader.open(&n, &aad, &sealed).is_err());
+        }
+
+        /// AAD-mismatch property: for arbitrary inputs, opening
+        /// with AAD that differs from the sealed AAD by any
+        /// amount MUST fail. This pins the swapped-block
+        /// contract from chapter 19: an attacker who keeps the
+        /// ciphertext but lies about its location AAD cannot
+        /// fool the cipher.
+        #[test]
+        fn proptest_aad_mismatch_fails_authentication(
+            k in proptest::array::uniform32(any::<u8>()),
+            n in proptest::array::uniform24(any::<u8>()),
+            sealed_aad in proptest::collection::vec(any::<u8>(), 0..64),
+            opened_aad in proptest::collection::vec(any::<u8>(), 0..64),
+            plaintext in proptest::collection::vec(any::<u8>(), 0..256),
+        ) {
+            prop_assume!(sealed_aad != opened_aad);
+            let cipher = Cipher::new(k);
+            let sealed = cipher.seal(&n, &sealed_aad, &plaintext);
+            prop_assert!(cipher.open(&n, &opened_aad, &sealed).is_err());
+        }
+    }
 }
