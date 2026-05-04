@@ -42,6 +42,13 @@
 //!   behind a `parking_lot::RwLock`.
 //! - On-disk **sorted string tables** (`sstable`) with a sparse
 //!   index, LZ4-compressed blocks, and a per-table bloom filter.
+//! - **Inventory and fingerprinting** ([`Lattice::byte_size_on_disk`],
+//!   [`Lattice::checksum`]) for capacity dashboards and
+//!   cross-host divergence detection. The fingerprint is an
+//!   xxh3-64 hash over the visible key/value set in ascending
+//!   key order; it is invariant under `flush` and `compact`,
+//!   so two replicas on the same logical state agree
+//!   regardless of how each got there.
 //! - **Strict-leveled compaction** (`compaction`) that picks
 //!   the shallowest level above its threshold and rewrites it
 //!   together with the overlapping subset of the next level
@@ -1439,6 +1446,99 @@ impl Lattice {
             next_seq,
             pending_writes,
         }
+    }
+
+    /// Total bytes the engine currently occupies on disk: the
+    /// sum of every live `SSTable` file size plus the current
+    /// length of the WAL. Memtable bytes are explicitly *not*
+    /// counted; for that, see [`Self::stats`] and the
+    /// `memtable_bytes` field.
+    ///
+    /// The number is a point-in-time observation. A concurrent
+    /// flush, compaction, or write may move the counter between
+    /// the snapshot of the LSM state and the `metadata` calls;
+    /// the returned value reflects the files that were live at
+    /// the moment the LSM state was sampled, rounded to whatever
+    /// the OS reports as their size at the metadata call.
+    ///
+    /// Useful for capacity-planning dashboards and operator
+    /// alerts. Not a hot path: the call performs one
+    /// `fs::metadata` syscall per live `SSTable` plus one for
+    /// the WAL.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use lattice_core::Lattice;
+    /// let dir = tempfile::tempdir()?;
+    /// let db = Lattice::open(dir.path())?;
+    /// db.put(b"k", b"v")?;
+    /// db.flush()?;
+    /// assert!(db.byte_size_on_disk()? > 0);
+    /// # Ok::<_, Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn byte_size_on_disk(&self) -> Result<u64> {
+        let state = self.inner.state.read().clone();
+        let mut total: u64 = 0;
+        for level in &state.levels {
+            for reader in level {
+                let path = sstable_path(&self.inner.path, reader.seq());
+                let len = fs::metadata(&path).map_or(0, |m| m.len());
+                total = total.saturating_add(len);
+            }
+        }
+        let wal_path = self.inner.path.join("wal.log");
+        let wal_len = fs::metadata(&wal_path).map_or(0, |m| m.len());
+        total = total.saturating_add(wal_len);
+        Ok(total)
+    }
+
+    /// Deterministic 64-bit fingerprint of the visible
+    /// `(key, value)` set in ascending key order. Two databases
+    /// with the same logical state produce the same value;
+    /// divergent state produces a different value. The hash is
+    /// invariant under [`Self::flush`] and [`Self::compact`]
+    /// because neither changes the visible set.
+    ///
+    /// The fingerprint is built from xxh3-64 over a stream of
+    /// length-prefixed key/value pairs:
+    /// `len(key) || key || len(value) || value`, lengths as
+    /// little-endian `u64`. Length-prefixing is load-bearing:
+    /// without it `("ab", "cd")` and `("a", "bcd")` would hash
+    /// the same.
+    ///
+    /// Cost is O(visible keys + visible bytes) plus the I/O to
+    /// stream the on-disk merge: not a hot path. Designed for
+    /// cross-host divergence detection (replicas on the same
+    /// logical state must agree on this fingerprint), test
+    /// fences that want to assert state equivalence between two
+    /// operation histories, and sanity checks after a recovery.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use lattice_core::Lattice;
+    /// let dir = tempfile::tempdir()?;
+    /// let db = Lattice::open(dir.path())?;
+    /// let empty_hash = db.checksum()?;
+    /// db.put(b"k", b"v")?;
+    /// assert_ne!(empty_hash, db.checksum()?);
+    /// # Ok::<_, Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn checksum(&self) -> Result<u64> {
+        let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+        for entry in self.scan_iter(None) {
+            let (key, value) = entry?;
+            #[allow(clippy::cast_possible_truncation)]
+            let key_len = key.len() as u64;
+            #[allow(clippy::cast_possible_truncation)]
+            let value_len = value.len() as u64;
+            hasher.update(&key_len.to_le_bytes());
+            hasher.update(&key);
+            hasher.update(&value_len.to_le_bytes());
+            hasher.update(&value);
+        }
+        Ok(hasher.digest())
     }
 
     /// Run a closure inside a snapshot-isolated transaction. Reads

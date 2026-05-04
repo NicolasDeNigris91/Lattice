@@ -416,4 +416,40 @@ proptest! {
         prop_assert_eq!(from_iter, from_reference,
             "scan_iter must agree with the BTreeMap reference");
     }
+
+    /// `checksum` is invariant under [`Lattice::flush`] and
+    /// [`Lattice::compact`]. The hash is computed over the
+    /// visible `(key, value)` set in ascending key order;
+    /// flush and compact rearrange the LSM layout but leave
+    /// the visible set unchanged, so the hash must agree
+    /// before and after the call. This is the v1.18
+    /// replication-readiness contract: replicas that converge
+    /// to the same logical state agree on the fingerprint
+    /// regardless of whether they reached it through identical
+    /// physical operations.
+    #[test]
+    fn checksum_is_invariant_under_flush_and_compact(
+        ops in proptest::collection::vec(arb_op(), 0..150),
+    ) {
+        let dir = tempdir().unwrap();
+        let db = Lattice::open(dir.path()).unwrap();
+
+        let mut reference: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        let mut all_keys: BTreeSet<Vec<u8>> = BTreeSet::new();
+        replay(&db, &ops, &mut reference, &mut all_keys);
+
+        let before = db.checksum().unwrap();
+        db.flush().unwrap();
+        let after_flush = db.checksum().unwrap();
+        prop_assert_eq!(
+            before, after_flush,
+            "flush is a layout-only move; checksum must be stable",
+        );
+        db.compact().unwrap();
+        let after_compact = db.checksum().unwrap();
+        prop_assert_eq!(
+            before, after_compact,
+            "compact is a layout-only move; checksum must be stable",
+        );
+    }
 }

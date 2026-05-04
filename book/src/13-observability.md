@@ -120,4 +120,48 @@ v1.8 behind the `metrics` feature flag. Spans drive
 distributed-tracing systems; metrics drive operational
 dashboards. See chapter 14.
 
+## Inventory and fingerprinting (v1.18)
+
+Two read-only methods land in v1.18 alongside the existing
+`stats()` snapshot, each answering an operational question
+that `stats()` does not.
+
+`Lattice::byte_size_on_disk() -> Result<u64>` returns the
+total bytes the engine occupies on disk: the sum of every
+live `SSTable` file size plus the current WAL length. Memtable
+bytes are explicitly not counted (those are in
+`Stats::memtable_bytes`). The number is a point-in-time
+observation; a concurrent flush or compaction may move the
+counter between the LSM-state snapshot and the per-file
+`metadata` syscalls. It is the right hook for a capacity
+dashboard or a "disk is filling up" alert.
+
+`Lattice::checksum() -> Result<u64>` returns a deterministic
+xxh3-64 fingerprint of the visible `(key, value)` set in
+ascending key order. The hash is invariant under `flush()`
+and `compact()` because neither changes the visible set; it
+changes when a put, delete, or value mutation perturbs the
+state. Two databases that converged to the same logical
+state, regardless of operation history, agree on the hash.
+The contract is the cross-host divergence-detection one:
+replicas on the same logical state must agree on this
+fingerprint, and a discrepancy points at a divergence that
+the rest of the engine cannot have already reported.
+
+The fingerprint is built from a stream of length-prefixed
+key/value pairs (`len(key) || key || len(value) || value`,
+lengths as little-endian `u64`). Length-prefixing is
+load-bearing: without it the pair `("ab", "cd")` would hash
+the same as `("a", "bcd")`. Cost is O(visible keys plus
+visible bytes) plus the I/O to stream the on-disk merge: not
+a hot path, but cheap enough to run as a smoke check after a
+recovery or in a periodic divergence sweep.
+
+The property fence
+`checksum_is_invariant_under_flush_and_compact` (in
+`tests/property_durability.rs`) drives 64 random op histories
+and asserts the hash agrees before and after the layout
+move. Pre-v1.18 this property had no API to verify; v1.18
+both ships the API and pins it under the property suite.
+
 [`tracing-test`]: https://docs.rs/tracing-test
