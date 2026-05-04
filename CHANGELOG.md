@@ -150,6 +150,39 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - No version bump. Pure infrastructure; the next feature
   release rolls these in.
 
+## [1.23.0] - 2026-05-04
+
+`lattice` CLI gains an operational subcommand set covering
+the v1.18-v1.21 additions. Operators can drive flush, stats,
+checksum, disk-size, and backup from a shell without writing
+a Rust program. Output formats are deliberately minimal so
+the commands compose with `xargs`, `diff`, `awk`, and other
+shell tooling.
+
+### Added
+- `lattice flush` (forces a memtable flush).
+- `lattice stats` (prints each [`Stats`] field as a
+  `label: value` line on stdout; doubles as a
+  Prometheus-text-format-ish tail for ad-hoc dashboards).
+- `lattice checksum` (prints the v1.18 xxh3-64 fingerprint as
+  16 hex chars, trailing newline).
+- `lattice disk-size` (prints the v1.18 on-disk byte
+  footprint as a `u64`, trailing newline).
+- `lattice backup-to <dest>` (wraps `Lattice::backup_to`;
+  `<dest>` becomes openable by `Lattice::open`).
+- `crates/lattice-cli/tests/ops_subcommands.rs` (5 integration
+  tests). Each invokes the built binary via
+  `CARGO_BIN_EXE_lattice` and asserts on stdout, stderr, and
+  exit codes. The `checksum` test pins the cross-host
+  divergence-detection contract at the CLI: two databases
+  with the same logical state produce identical hex output.
+- `tempfile` as a dev-dependency on the `lattice-cli` crate
+  (used by the new integration suite).
+- Book chapter 13 ("Observability") gains a "CLI ops
+  surface (v1.23)" section with the subcommand table, a
+  worked divergence-sweep one-liner, and a pointer to the
+  test suite.
+
 ## [1.22.0] - 2026-05-04
 
 `AsyncLattice` surface parity. The synchronous engine grew
