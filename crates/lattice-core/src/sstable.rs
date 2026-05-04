@@ -239,6 +239,15 @@ pub(crate) struct SSTableReader {
     bloom: BloomFilter,
     seq: u64,
     path: PathBuf,
+    /// Smallest key in the table. Equals `index[0].first_key`. Cached
+    /// on open so the strict-leveled compactor can compare ranges
+    /// without touching disk.
+    min_key: Vec<u8>,
+    /// Largest key in the table. Computed at open time by decoding the
+    /// last data block and recording its terminal entry. Cached so the
+    /// strict-leveled compactor can compute level-N+1 overlap subsets
+    /// without reopening data blocks.
+    max_key: Vec<u8>,
 }
 
 impl SSTableReader {
@@ -283,17 +292,48 @@ impl SSTableReader {
         file.read_exact(&mut index_bytes)?;
         let index = parse_index(&index_bytes)?;
 
+        if index.is_empty() {
+            return Err(Error::MalformedFormat("sstable has no data blocks"));
+        }
+        let min_key = index[0].first_key.clone();
+        let last_index_entry = &index[index.len() - 1];
+        let mut last_block_buf = vec![0u8; last_index_entry.compressed_len as usize];
+        file.seek(SeekFrom::Start(last_index_entry.offset))?;
+        file.read_exact(&mut last_block_buf)?;
+        let last_block =
+            lz4_flex::decompress(&last_block_buf, last_index_entry.uncompressed_len as usize)?;
+        let last_entries = parse_block(&last_block)?;
+        let max_key = last_entries
+            .last()
+            .map(|(k, _)| k.clone())
+            .ok_or(Error::MalformedFormat("sstable last block is empty"))?;
+
         Ok(Self {
             file: Mutex::new(file),
             index,
             bloom,
             seq,
             path: path.to_path_buf(),
+            min_key,
+            max_key,
         })
     }
 
     pub(crate) const fn seq(&self) -> u64 {
         self.seq
+    }
+
+    /// Smallest key in the table (inclusive). Cached at open time;
+    /// the strict-leveled compactor uses this to detect range
+    /// overlap with target-level tables without reading disk.
+    pub(crate) fn min_key(&self) -> &[u8] {
+        &self.min_key
+    }
+
+    /// Largest key in the table (inclusive). Cached at open time
+    /// from the last data block's final entry.
+    pub(crate) fn max_key(&self) -> &[u8] {
+        &self.max_key
     }
 
     #[allow(dead_code)]

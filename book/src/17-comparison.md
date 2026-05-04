@@ -15,7 +15,7 @@ fits your problem, not to convince you to pick Lattice.
 |                                 | Lattice              | sled                 | fjall                  | rocksdb                       |
 |---------------------------------|----------------------|----------------------|------------------------|-------------------------------|
 | Implementation language         | Rust                 | Rust                 | Rust                   | C++ (Rust binding)            |
-| LSM design                      | Tiered leveled       | Bw-tree-ish          | Tiered leveled         | Strict leveled                |
+| LSM design                      | Strict leveled       | Bw-tree-ish          | Tiered leveled         | Strict leveled                |
 | `unsafe` in the engine          | Forbidden            | Used (lock-free)     | Used (mmap, etc)       | Entire engine is C++          |
 | Transactions                    | Snapshot isolation   | Limited (CAS only)   | None at engine level   | Optimistic / pessimistic      |
 | Streaming scan                  | Yes (`scan_iter`)    | Yes                  | Yes                    | Yes                           |

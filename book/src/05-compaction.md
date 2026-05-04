@@ -201,19 +201,85 @@ still overlap by key range. Both are fixed; the property test
 runs sixty-four random operation sequences per `cargo test` and
 hardens any new edits against regression.
 
-Trade-offs that remain
-----------------------
+Trade-offs that remained through v1.16
+--------------------------------------
 
-The v1.3 algorithm is **size-tiered** rather than strict leveled:
-tables within a single level can still overlap by key range,
-because each merge produces one output covering the full key
-range it saw. Strict leveled (each L1+ partitioned into
+The v1.3 through v1.16 algorithm was **size-tiered** rather than
+strict leveled: tables within a single level could still overlap
+by key range, because each merge produced one output covering the
+full key range it saw. Strict leveled (each L1+ partitioned into
 non-overlapping ranges, merging includes overlapping target-level
-tables) is a v1.4+ milestone. The win for size-tiered is that the
-algorithm and the read path stay simple while the write
-amplification ceiling drops by orders of magnitude.
+tables) was deferred while the surrounding plumbing solidified.
 
 [compaction]: https://github.com/NicolasDeNigris91/Lattice/blob/main/crates/lattice-core/src/compaction.rs
+
+Strict leveled compaction (v1.17)
+---------------------------------
+
+v1.17 closes the size-tiered deferral. A round from level `N` to
+`N+1` no longer just merges every source table into one new
+output that gets appended to the target level. Instead the round
+picks the **overlapping subset** of `N+1`, the tables whose
+on-disk key range intersects the combined range of the source
+level, and merges them together with the source. The
+non-overlapping tables in `N+1` are kept in place: same sequence
+numbers, same files, no rewrite cost.
+
+Concretely:
+
+1. Snapshot the source level (every table in level `N`).
+2. Compute `(source_min, source_max)`, the inclusive combined
+   range of the source tables. Each `SSTableReader` exposes
+   `min_key()` and `max_key()`, cached at open time so the
+   compactor never reaches for disk to make this decision.
+3. Partition the existing `N+1` tables into `target_overlap`
+   (range intersects `[source_min, source_max]`) and `target_keep`
+   (range disjoint from the source).
+4. Merge `target_overlap` plus the source level, oldest-first
+   for last-writer-wins. The deeper level is older overall, and
+   within a level insertion order is sequence-number order, so
+   the iteration is `target_overlap.iter().chain(source.iter())`.
+5. Install: empty source level; the new level `N+1` is
+   `target_keep` plus the merged output, sorted by
+   `min_key()` for a deterministic layout.
+6. Delete the source files and the `target_overlap` files. Files
+   in `target_keep` keep their inodes and their open `File`
+   handles inside live `SSTableReader` `Arc`s.
+
+A merge whose inputs cancel out (every key tombstoned, with
+`drop_tombstones = true`) returns `CompactOutcome::Empty`: no
+file is written and the install step skips appending a new
+table. The source level still ends up empty, the
+`target_overlap` files are still deleted, and `next_seq`
+advances so a future flush does not collide with the unused
+number.
+
+The win for write amplification is significant on workloads
+that touch a hot subset of the keyspace. A v1.16 compaction of
+a 1 GB level `N+1` against a 100 MB level `N` rewrote the full
+1.1 GB on every round; v1.17 rewrites only the overlap, often
+under 200 MB, and keeps the 900 MB cold subset on disk
+unchanged. The property fence
+`arbitrary_ops_match_btreemap_after_reopen` runs unchanged: the
+selective merge preserves the same observable
+`(key, value)` set as the old algorithm.
+
+The drop-tombstones rule tightens slightly. Pre-v1.17 it was
+"no level at or below the target holds tables." With strict
+leveled the non-overlap subset of the target level is by
+construction range-disjoint from the source, so it cannot hold
+an older version of any merged key. The refined rule is "no
+level **deeper than** the target holds tables": the target
+level's keep subset is irrelevant.
+
+The `compact_level(0)` test fence
+`strict_leveled_keeps_non_overlapping_l1_sstables_intact`
+constructs `L1` with three disjoint ranges, then drives a
+fourth round whose source covers only one of them. Pre-v1.17
+the round produced four `L1` tables (the new merged output
+appended to the existing three); v1.17 produces three (the
+overlapping range rewritten in place, the other two untouched
+by sequence number).
 
 Non-blocking compaction (v1.13)
 -------------------------------

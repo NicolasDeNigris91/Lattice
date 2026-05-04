@@ -92,12 +92,14 @@ without locking. Tracked as a v2.x candidate.
 
 ### Strict RocksDB-style leveled compaction
 
-v1.3's leveled compaction merges every overlapping table in
-the source level into a single output. RocksDB partitions
-levels into non-overlapping key ranges and only merges the
-slice of overlapping tables. The arithmetic is the same; the
-bookkeeping is a hundred lines and a test fixture. Tracked as
-a v2.x candidate.
+**Shipped in v1.17.** v1.3's leveled compaction merged every
+overlapping table in the source level into a single output that
+was appended to the target level, leaving L1+ size-tiered. v1.17
+partitions levels into overlapping and non-overlapping subsets
+and merges only the slice that intersects the source's combined
+range. Non-overlapping target tables keep their sequence numbers
+and on-disk files. See chapter [Compaction](05-compaction.md)
+for the algorithm.
 
 ### Streaming scan
 

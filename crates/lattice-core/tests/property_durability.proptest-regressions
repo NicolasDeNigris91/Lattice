@@ -7,3 +7,4 @@
 cc cce744631ea9d9392ff565b3a78ffa73cce76e83137a597fd3a571dce0dd9e94 # shrinks to ops = [Put([97], []), Flush, Put([97], []), Flush, Compact, Put([97], []), Flush, Delete([97]), Flush, Compact]
 cc fe0b22634ad8d6413fcfaf86ab4516c83eb6cb0799f666fc6c533b131aa215bb # shrinks to ops = [Put([97], []), Flush, Put([98], []), Flush, Compact, Put([97], []), Flush, Delete([97]), Flush, Compact]
 cc 6f28b81a470ae80857d876e5d2592c3eba4cd8e8f8567c395ee47af5037f7744 # shrinks to ops = [Put([97], []), Flush, Put([98], []), Flush, Put([97], []), Compact, Flush, Put([97], []), Flush, Delete([97]), Flush, Put([97], [0]), Flush]
+cc 28a6b8396244e3d1ce72fb1de2808d161dcbd643445fae89e5a579e49e4d6cb1 # shrinks to ops = [Delete([97]), Flush, Delete([97]), Flush, Compact], lo = 0, hi = 0

@@ -42,9 +42,12 @@
 //!   behind a `parking_lot::RwLock`.
 //! - On-disk **sorted string tables** (`sstable`) with a sparse
 //!   index, LZ4-compressed blocks, and a per-table bloom filter.
-//! - **Tiered leveled compaction** (`compaction`) that picks
-//!   the shallowest level above its threshold and merges it
-//!   down. Compaction can run synchronously
+//! - **Strict-leveled compaction** (`compaction`) that picks
+//!   the shallowest level above its threshold and rewrites it
+//!   together with the overlapping subset of the next level
+//!   down. Non-overlapping tables in the target level are kept
+//!   in place, so each compaction pays only for the bytes whose
+//!   key range actually changed. Runs synchronously
 //!   ([`Lattice::compact`]) or on a dedicated background thread
 //!   ([`Lattice::compact_async`]).
 //!
@@ -1162,21 +1165,27 @@ impl Lattice {
         Ok(())
     }
 
-    /// Compact every `SSTable` in `level_idx` into a single table
-    /// pushed to `level_idx + 1`. Internal helper used by both the
-    /// auto-compaction trigger and the user-facing `compact()`.
+    /// Compact every `SSTable` in `level_idx` together with the
+    /// overlapping subset of `level_idx + 1` into a single table
+    /// installed back into `level_idx + 1`. Strict-leveled selection
+    /// (`RocksDB` style) introduced in v1.17: the merge inputs are
+    /// the source level *plus* exactly the target-level tables
+    /// whose key range intersects the source's combined range.
+    /// Non-overlapping target tables are kept in place, retaining
+    /// their sequence numbers and on-disk files, so a level can be
+    /// rewritten incrementally without re-paying the cost of every
+    /// previously compacted byte.
+    #[allow(clippy::too_many_lines)]
     fn compact_level(&self, level_idx: usize) -> Result<()> {
         let started = Instant::now();
         let _mutation_guard = self.inner.mutation_lock.lock();
 
-        // Snapshot the source level. Sources are taken in insertion
-        // order (oldest first) because `compact_all` is a
+        // Snapshot the source level, the target level, the next
+        // free sequence number, and whether tombstones can be
+        // dropped at this boundary. Sources stay in insertion order
+        // (oldest first) because `compact_all` is a
         // last-writer-wins merge that needs newer inputs later.
-        // We also check whether the target level (level_idx + 1) is
-        // the bottom of the LSM right now: if no deeper level has
-        // any tables, tombstones in the merged output have nothing
-        // older to shadow and are safe to drop.
-        let (sources, new_seq, drop_tombstones) = {
+        let (sources, target_existing, new_seq, drop_tombstones) = {
             let state = self.inner.state.read();
             let Some(level) = state.levels.get(level_idx) else {
                 return Ok(());
@@ -1185,15 +1194,59 @@ impl Lattice {
                 return Ok(());
             }
             let target_level = level_idx + 1;
+            let target_existing: Vec<Arc<SSTableReader>> =
+                state.levels.get(target_level).cloned().unwrap_or_default();
             // Tombstones in the source can shadow data physically
-            // resident in the target level (we do not yet merge with
-            // target-level tables) or in any deeper level. Drop them
-            // only when no level at or below target holds any
-            // tables; otherwise keep them so reads still see the
-            // delete.
-            let drop_tombstones = state.levels.iter().skip(target_level).all(Vec::is_empty);
-            (level.clone(), state.next_seq, drop_tombstones)
+            // resident in any level deeper than the target. The
+            // non-overlap subset of the target level is by
+            // construction range-disjoint from the source, so it
+            // cannot hold an older version of any key in the merge
+            // and is irrelevant to this decision. Drop tombstones
+            // only when no level deeper than the target holds any
+            // tables.
+            let drop_tombstones = state
+                .levels
+                .iter()
+                .skip(target_level + 1)
+                .all(Vec::is_empty);
+            (
+                level.clone(),
+                target_existing,
+                state.next_seq,
+                drop_tombstones,
+            )
         };
+
+        // Combined range of the source level. Sources is non-empty
+        // because we returned early on `level.len() < 2`.
+        let source_min: Vec<u8> = sources
+            .iter()
+            .map(|r| r.min_key().to_vec())
+            .min()
+            .expect("sources non-empty");
+        let source_max: Vec<u8> = sources
+            .iter()
+            .map(|r| r.max_key().to_vec())
+            .max()
+            .expect("sources non-empty");
+
+        // Partition the existing target level into the overlap
+        // subset (intersects [source_min, source_max]) and the
+        // keep-in-place subset (range-disjoint from source).
+        let (target_overlap, target_keep): (Vec<_>, Vec<_>) =
+            target_existing.into_iter().partition(|r| {
+                !(r.max_key() < source_min.as_slice() || r.min_key() > source_max.as_slice())
+            });
+
+        // Merge order is oldest-first for last-writer-wins. The
+        // target level (deeper, level_idx+1) is older than the
+        // source level (level_idx); within either level, sequence
+        // order is insertion order.
+        let mut readers_owned: Vec<Arc<SSTableReader>> =
+            Vec::with_capacity(target_overlap.len() + sources.len());
+        readers_owned.extend(target_overlap.iter().cloned());
+        readers_owned.extend(sources.iter().cloned());
+        let readers: Vec<&SSTableReader> = readers_owned.iter().map(Arc::as_ref).collect();
 
         // I/O outside any state lock.
         let final_path = sstable_path(&self.inner.path, new_seq);
@@ -1202,18 +1255,34 @@ impl Lattice {
             .path
             .join(format!("{new_seq:0SSTABLE_DIGITS$}.sst.tmp"));
         let _ = fs::remove_file(&tmp_path);
-        let readers: Vec<&SSTableReader> = sources.iter().map(Arc::as_ref).collect();
-        compaction::compact_all(&readers, &tmp_path, drop_tombstones)?;
+        let outcome = compaction::compact_all(&readers, &tmp_path, drop_tombstones)?;
         drop(readers);
-        fs::rename(&tmp_path, &final_path)?;
-        sync_dir(&self.inner.path)?;
-        let new_reader = Arc::new(SSTableReader::open(&final_path, new_seq)?);
+        drop(readers_owned);
+        let new_reader: Option<Arc<SSTableReader>> = match outcome {
+            compaction::CompactOutcome::Wrote => {
+                fs::rename(&tmp_path, &final_path)?;
+                sync_dir(&self.inner.path)?;
+                Some(Arc::new(SSTableReader::open(&final_path, new_seq)?))
+            }
+            compaction::CompactOutcome::Empty => None,
+        };
 
-        let old_seqs: Vec<u64> = sources.iter().map(|r| r.seq()).collect();
+        // Sequence numbers we will physically delete: every source
+        // table, plus only the overlap subset of the target. The
+        // keep-in-place subset stays on disk and in memory.
+        let old_seqs: Vec<u64> = sources
+            .iter()
+            .map(|r| r.seq())
+            .chain(target_overlap.iter().map(|r| r.seq()))
+            .collect();
 
-        // Install: empty the source level, push the merged output to
-        // the next level down (creating that level if needed).
-        // `frozen` and other levels are unchanged.
+        // Install: empty the source level; in the target level
+        // keep the non-overlap subset, append the new merged
+        // output (if any), and resort by min_key for a
+        // deterministic layout. When the merge cancelled out we
+        // skip allocating a new sstable but still advance
+        // `next_seq` so subsequent flushes do not collide with the
+        // unused number.
         {
             let mut state_g = self.inner.state.write();
             let mut new_levels = state_g.levels.clone();
@@ -1224,7 +1293,12 @@ impl Lattice {
             while new_levels.len() <= level_idx + 1 {
                 new_levels.push(Vec::new());
             }
-            new_levels[level_idx + 1].push(new_reader);
+            let mut next_target = target_keep.clone();
+            if let Some(reader) = new_reader {
+                next_target.push(reader);
+            }
+            next_target.sort_by(|a, b| a.min_key().cmp(b.min_key()));
+            new_levels[level_idx + 1] = next_target;
             *state_g = Arc::new(State {
                 frozen: state_g.frozen.clone(),
                 levels: new_levels,
@@ -1235,6 +1309,8 @@ impl Lattice {
         // unlink on POSIX (snapshots still holding them keep the
         // inode alive, which is fine).
         drop(sources);
+        drop(target_overlap);
+        drop(target_keep);
 
         self.persist_manifest()?;
 
@@ -1736,5 +1812,104 @@ mod tests {
             "T1 commit must abort with TransactionConflict, got {r1:?}",
         );
         assert_eq!(db.get(b"k").unwrap(), Some(b"v_t2".to_vec()));
+    }
+
+    /// Strict leveled invariant: a single compaction round from
+    /// level N to N+1 rewrites only the subset of N+1 whose key
+    /// range overlaps the merged source. Non-overlapping target
+    /// tables retain their original sequence numbers and on-disk
+    /// files.
+    ///
+    /// The pre-v1.17 algorithm appended the merged output to N+1
+    /// without consulting existing tables, so a level could end up
+    /// with overlapping sstables and large datasets paid the full
+    /// rewrite cost on every compaction. The strict-leveled
+    /// algorithm picks the overlap subset of N+1, merges it into
+    /// the inputs, and replaces only that subset; non-overlapping
+    /// tables in N+1 are untouched.
+    #[test]
+    fn strict_leveled_keeps_non_overlapping_l1_sstables_intact() {
+        let dir = tempdir().unwrap();
+        // Disable auto-compaction so flush() does not cascade and
+        // pollute the level shape we are constructing by hand.
+        let db = Lattice::builder(dir.path())
+            .compaction_threshold(usize::MAX)
+            .open()
+            .unwrap();
+
+        // Helper: insert two keys (one per memtable, separated by
+        // an explicit flush), then run one round of compact_level(0)
+        // to push the resulting two L0 tables into a single L1
+        // sstable. After three rounds, L1 holds three sstables
+        // covering disjoint key ranges.
+        let put_flush_compact = |db: &Lattice, k1: &[u8], k2: &[u8]| {
+            db.put(k1, b"v").unwrap();
+            db.flush().unwrap();
+            db.put(k2, b"v").unwrap();
+            db.flush().unwrap();
+            db.compact_level(0).unwrap();
+        };
+
+        put_flush_compact(&db, b"a01", b"a02");
+        put_flush_compact(&db, b"m01", b"m02");
+        put_flush_compact(&db, b"x01", b"x02");
+
+        let l1_seqs_before: Vec<u64> = {
+            let state = db.inner.state.read();
+            state.levels[1].iter().map(|r| r.seq()).collect()
+        };
+        assert_eq!(
+            l1_seqs_before.len(),
+            3,
+            "setup: L1 must hold 3 disjoint sstables before the strict-leveled round (got {l1_seqs_before:?})",
+        );
+
+        // Round 4: produce two new L0 tables whose combined range
+        // overlaps only the first L1 sstable (the [a01..=a02] one).
+        db.put(b"a015", b"v").unwrap();
+        db.flush().unwrap();
+        db.put(b"a016", b"v").unwrap();
+        db.flush().unwrap();
+        db.compact_level(0).unwrap();
+
+        let l1_seqs_after: Vec<u64> = {
+            let state = db.inner.state.read();
+            state.levels[1].iter().map(|r| r.seq()).collect()
+        };
+
+        // Strict leveled: L1 still has exactly three sstables. The
+        // [m01..=m02] and [x01..=x02] tables retain their original
+        // seqs because nothing in the compacted input overlapped
+        // their range.
+        assert_eq!(
+            l1_seqs_after.len(),
+            3,
+            "strict leveled: L1 must keep three sstables (only the overlapping subset is rewritten); got {l1_seqs_after:?}",
+        );
+        let kept = &l1_seqs_before[1..3];
+        for seq in kept {
+            assert!(
+                l1_seqs_after.contains(seq),
+                "strict leveled: non-overlapping L1 sstable seq {seq} must survive the round (after = {l1_seqs_after:?})",
+            );
+        }
+
+        // All originally written data is still readable.
+        for key in [
+            b"a01".as_slice(),
+            b"a02",
+            b"a015",
+            b"a016",
+            b"m01",
+            b"m02",
+            b"x01",
+            b"x02",
+        ] {
+            assert_eq!(
+                db.get(key).unwrap().as_deref(),
+                Some(b"v".as_slice()),
+                "post-compaction read for {key:?} must still see the value",
+            );
+        }
     }
 }

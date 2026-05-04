@@ -16,16 +16,32 @@ use tracing::{debug, info};
 use crate::error::Result;
 use crate::sstable::{SSTableReader, SSTableWriter};
 
+/// Outcome of a compaction merge.
+pub(crate) enum CompactOutcome {
+    /// Wrote a non-empty `SSTable` at the requested output path.
+    Wrote,
+    /// All inputs cancelled out (every key was tombstoned and
+    /// `drop_tombstones` was true, or the inputs were empty). No
+    /// file was created at the output path; the caller must not
+    /// attempt to open or rename it.
+    Empty,
+}
+
 /// Merge every entry from `readers` (in oldest-to-newest order) into a
 /// single new `SSTable` written at `output`. When `drop_tombstones` is
 /// `true` deletions are dropped from the output; when `false` they are
 /// preserved so they can shadow older data still resident in deeper
 /// levels.
+///
+/// If the merge would yield zero records (e.g. two tombstones for the
+/// same key with `drop_tombstones = true`), no file is created and
+/// [`CompactOutcome::Empty`] is returned. The caller is responsible
+/// for not consuming `output` in that case.
 pub(crate) fn compact_all(
     readers: &[&SSTableReader],
     output: &Path,
     drop_tombstones: bool,
-) -> Result<usize> {
+) -> Result<CompactOutcome> {
     let mut accumulator: BTreeMap<Vec<u8>, Option<Vec<u8>>> = BTreeMap::new();
 
     for reader in readers {
@@ -45,13 +61,17 @@ pub(crate) fn compact_all(
     } else {
         accumulator.into_iter().collect()
     };
+    if entries_to_write.is_empty() {
+        info!(output = %output.display(), "compaction merge cancelled out; no sstable written");
+        return Ok(CompactOutcome::Empty);
+    }
     let live_count = entries_to_write.iter().filter(|(_, v)| v.is_some()).count();
 
-    let mut writer = SSTableWriter::create(output, entries_to_write.len().max(1))?;
+    let mut writer = SSTableWriter::create(output, entries_to_write.len())?;
     for (key, value) in entries_to_write {
         writer.append(key, value)?;
     }
     writer.finish()?;
     info!(live = live_count, output = %output.display(), "compaction wrote new sstable");
-    Ok(live_count)
+    Ok(CompactOutcome::Wrote)
 }
