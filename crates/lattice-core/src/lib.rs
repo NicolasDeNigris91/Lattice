@@ -115,6 +115,13 @@
 #[cfg(feature = "tokio")]
 mod async_api;
 mod bloom;
+// Phase A of the v2.0 encryption-at-rest milestone (book
+// chapter 19). The cipher wrapper is crate-private; the
+// public `LatticeBuilder::encryption_key` knob lands with
+// phase D. Phase A's job is to land tested cipher plumbing
+// in isolation so the on-disk format work in phases B-D has
+// a primitive to build against.
+mod cipher;
 mod compaction;
 // `compactor` is internal to the engine; the loom test crate
 // needs cross-crate access to drive its model checks. Same trick
