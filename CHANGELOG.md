@@ -150,6 +150,61 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - No version bump. Pure infrastructure; the next feature
   release rolls these in.
 
+## [1.27.0] - 2026-05-04
+
+Phase A of the v2.0 encryption-at-rest milestone (book
+chapter 19): cipher plumbing in isolation. Adds an internal
+`Cipher` wrapper around `XChaCha20-Poly1305` with the AAD
+binding the chapter-19 design doc settled. The module is
+crate-private and dormant; no public API changes, no
+on-disk format changes. Phases B-D wire the primitive
+through the SSTable, WAL, and manifest paths and surface
+`LatticeBuilder::encryption_key` at v2.0.0.
+
+### Added
+- Two workspace dependencies: `chacha20poly1305 = "0.10"`
+  for the XChaCha20-Poly1305 AEAD and `zeroize = "1.8"`
+  with the `derive` feature for key-material wiping.
+  Lattice-core picks up both.
+- `crates/lattice-core/src/cipher.rs`: a crate-private
+  `Cipher` wrapper exposing `seal(nonce, aad, plaintext)`
+  and `open(nonce, aad, ciphertext_with_tag)`. The 32-byte
+  key is held under `zeroize::Zeroizing` so a panic
+  anywhere on the seal/open path does not leave key
+  material on the heap. `Debug` is custom-implemented to
+  print `Cipher { /* redacted */ }` instead of the key
+  bytes.
+- `CipherError::Authentication` (crate-internal) and the
+  matching `CipherResult<T>` alias. The crate-level
+  `Error::Encryption*` variants land in phase D when the
+  cipher gets wired through the public API.
+- 9 unit tests in `cipher.rs`:
+  `round_trip_returns_the_original_plaintext`,
+  `ciphertext_does_not_equal_plaintext`,
+  `wrong_key_fails_authentication`,
+  `aad_mismatch_fails_authentication` (the chapter-19
+  swapped-block contract),
+  `nonce_mismatch_fails_authentication`,
+  `flipping_a_ciphertext_bit_fails_authentication` (the
+  chapter-19 bit-flip fuzz contract, exhaustive across
+  every bit of every byte of a sealed payload),
+  `truncated_ciphertext_fails_authentication`,
+  `debug_does_not_leak_key_bytes`,
+  `empty_plaintext_round_trips`.
+
+### Notes
+- No public API changes. The cipher is `pub(crate)` and
+  has no callers yet outside its own tests; the
+  `#[allow(dead_code)]` at the module head is deliberate
+  scaffolding for phases B-D.
+- No on-disk format changes. The format-version bump
+  (SSTable v3, WAL v2, manifest v3) lands in phases B, C,
+  and D respectively.
+- v2.0.0 is gated on phase D landing
+  (`LatticeBuilder::encryption_key`,
+  `Error::Encryption*`, the legacy-upgrade builder flag).
+  v1.27.0 is the build-ahead-of-use scaffolding step.
+
 ## [1.26.0] - 2026-05-04
 
 Deploy hardening for the static book. The Caddyfile gains

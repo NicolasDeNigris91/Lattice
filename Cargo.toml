@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.26.0"
+version = "1.27.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -21,7 +21,7 @@ categories = ["database-implementations", "data-structures"]
 
 [workspace.dependencies]
 # Internal
-lattice-core = { path = "crates/lattice-core", version = "1.26.0" }
+lattice-core = { path = "crates/lattice-core", version = "1.27.0" }
 
 # Serialization and binary formats
 serde = { version = "1.0", features = ["derive"] }
@@ -34,6 +34,16 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Compression
 lz4_flex = { version = "0.11", default-features = false, features = ["safe-encode", "safe-decode", "std"] }
+
+# Cipher (phase A of the v2.0 encryption-at-rest milestone;
+# see book chapter 19). XChaCha20-Poly1305 picked for its
+# 192-bit nonce, which escapes the per-key counter discipline
+# AES-GCM and RFC-7539 ChaCha would otherwise impose on a
+# long-lived database. `zeroize` wipes key material when the
+# wrapper drops so a panic during `open` does not leave a key
+# on the heap.
+chacha20poly1305 = "0.10"
+zeroize = { version = "1.8", features = ["derive"] }
 
 # Concurrency primitives
 parking_lot = "0.12"
