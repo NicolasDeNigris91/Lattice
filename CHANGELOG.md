@@ -150,6 +150,49 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - No version bump. Pure infrastructure; the next feature
   release rolls these in.
 
+## [1.28.0] - 2026-05-04
+
+Phase A.5 of the v2.0 encryption-at-rest milestone (book
+chapter 19): proptest property fences over the cipher. The
+v1.27 unit tests pinned eight specific contracts at
+hand-picked seeds; v1.28 generalises them to 64 random
+inputs each so a regression in any future phase that
+re-routes the cipher path (B wires it into SSTables, C into
+the WAL, D into the manifest) is caught by both the unit
+and the property layer. Cipher implementation unchanged;
+this is purely a test-depth investment.
+
+### Added
+- Four proptest fences in `cipher.rs::tests`, 64 cases each:
+  - `proptest_round_trip_under_arbitrary_inputs`. For
+    arbitrary key / nonce / AAD / plaintext (up to 4 KiB),
+    seal-then-open returns the exact input. The 4 KiB
+    range exercises multiple cipher block boundaries; the
+    unit test only covered short payloads.
+  - `proptest_any_bit_flip_fails_authentication`. For
+    arbitrary inputs, flipping any single bit anywhere in
+    the sealed payload (ciphertext or tag) causes the open
+    to fail. Generalises the deterministic exhaustive
+    bit-flip unit test to arbitrary keys, nonces, AAD
+    strings, and plaintexts.
+  - `proptest_wrong_key_fails_authentication`. For
+    arbitrary inputs with a deliberately-perturbed reader
+    key, open fails. Pins the wrong-key contract under the
+    full key-space rather than two hand-picked keys.
+  - `proptest_aad_mismatch_fails_authentication`. The
+    swapped-block contract from chapter 19 generalised: an
+    attacker who keeps the ciphertext but lies about the
+    AAD cannot fool the cipher across arbitrary key /
+    nonce / payload triples.
+
+### Notes
+- No public API changes. The cipher remains crate-private
+  scaffolding ahead of phases B-D.
+- proptest is already a workspace dev-dependency
+  (`tests/property_durability.rs` uses it). Tests in
+  `mod tests` inside `src/cipher.rs` access dev-deps
+  directly; no new dependency surface.
+
 ## [1.27.0] - 2026-05-04
 
 Phase A of the v2.0 encryption-at-rest milestone (book
