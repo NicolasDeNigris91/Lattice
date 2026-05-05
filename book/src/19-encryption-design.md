@@ -127,9 +127,14 @@ The current footer (chapter 3, format version 2) is 48 bytes:
 ```
 
 Format version 3 reuses the `reserved: u32` field as a
-flags word. Bit 0 set means "blocks and index are
-encrypted; the per-block nonce is the deterministic
-derivation `nonce_prefix(8) || sstable_seq.to_le_bytes()(8) || block_index.to_le_bytes()(8)`".
+flags word. Bit 0 set means "data blocks are encrypted;
+the per-block nonce is the deterministic derivation
+`nonce_prefix(8) || sstable_seq.to_le_bytes()(8) || block_index.to_le_bytes()(8)`".
+The bloom and index blocks stay cleartext under bit 0;
+encrypting them is reserved for a future flag bit so the
+v3 format gains protected-block coverage in one phase and
+catalog metadata coverage in another, each with its own
+green-bar gate.
 
 ```text
 | bloom_offset: u64 | bloom_length: u64 | index_offset: u64 |
