@@ -150,6 +150,104 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - No version bump. Pure infrastructure; the next feature
   release rolls these in.
 
+## [1.29.0] - 2026-05-04
+
+Phase B session 1 of 2 of the v2.0 encryption-at-rest
+milestone (book chapter 19): the `SSTable` writer learns
+to seal each data block under XChaCha20-Poly1305. The
+on-disk format version field bumps from 2 to 3, the v2
+reserved tail of the footer becomes a flags word, and bit
+0 of that word records whether the data blocks of a given
+table are encrypted. The reader and the public builder
+surface stay untouched in this release; they land in
+v1.30.0 (session 2 of 2), which closes the round-trip
+property fence and the cargo-fuzz target chapter 19
+specifies. Until then the encrypted writer is reachable
+only from the unit tests pinning its byte contract.
+
+### Changed
+- `SSTable` on-disk format version from 2 to 3. Existing
+  v2 files written by v1.28.0 and earlier no longer open
+  on this binary; the reader rejects them with the
+  existing `"unsupported sstable version"` error. This is
+  a deliberate part of the v2.0 milestone roadmap (book
+  chapter 19, "On-disk format"): a v1 binary opening a v2
+  encrypted directory must fail loudly, never silently
+  mis-decode. Cleanly tagged so a downgrade to v1.28.0 is
+  a one-command rollback for anyone who already has v3
+  data on disk.
+- The v3 footer reuses the v2 `reserved: u32` tail as a
+  flags word. Bit 0 (`FOOTER_FLAG_ENCRYPTED_BLOCKS`) is
+  set when the data blocks of the table are sealed under
+  XChaCha20-Poly1305. Bits 1..31 stay zero in v1.29.0; the
+  bloom block and the index block stay cleartext under
+  bit 0, with their encryption reserved for a future flag
+  bit so the v3 format gains coverage one phase at a time.
+- The `SSTableWriter` struct now carries a `'cipher`
+  lifetime parameter and an `Option<&Cipher>` field. The
+  default `create(path, expected_keys)` constructor still
+  builds a cleartext writer so the existing flush and
+  compaction call sites in `lib.rs` and `compaction.rs`
+  need no change; encryption happens through the new
+  `create_with_cipher(path, expected_keys, seq, cipher)`
+  entry point, which threads the sequence number into
+  both the per-block nonce and the AAD so a ciphertext
+  cannot be moved between `SSTables` under the same key.
+
+### Added
+- Per-block nonce derivation
+  `NONCE_PREFIX_SST_BLOCK || sstable_seq.to_le_bytes() || block_index.to_le_bytes()`
+  (an 8-byte domain separator plus the two 8-byte
+  identifiers, totalling the 24-byte XChaCha nonce). The
+  `sst-blk-` prefix prevents nonce collisions with the
+  WAL and manifest cipher contexts that arrive in phases
+  C and D.
+- AAD derivation
+  `AAD_TAG_SST_BLOCK || sstable_seq.to_le_bytes() || block_index.to_le_bytes()`
+  (the literal `lattice-sst-block-v3` tag plus the two
+  8-byte identifiers). Mirrors the chapter 19 swapped-
+  block defence: an attacker who keeps a valid ciphertext
+  but lies about its `(seq, block_index)` location flips
+  the AAD bytes and fails the Poly1305 verify.
+- Three writer-only contract tests in
+  `crates/lattice-core/src/sstable.rs::tests`. The reader
+  is unchanged this session, so each test parses the raw
+  bytes off disk:
+  - `sstable_v3_writes_v2_compatible_format_when_cipher_absent`
+    pins that the no-cipher path still produces LZ4-only
+    blocks with a zero flags word, just at version 3.
+  - `sstable_v3_writes_encrypted_blocks_when_cipher_supplied`
+    pins the encrypted-block layout (ciphertext +
+    16-byte Poly1305 tag), the footer flag bit, and the
+    chapter 19 nonce + AAD derivation by round-tripping
+    block 0 through `Cipher::open`.
+  - `sstable_v3_encrypted_blocks_use_distinct_nonce_per_block_index`
+    forces at least two blocks, opens each under its own
+    `block_index`, and asserts that block 0's ciphertext
+    refuses to open under block 1's nonce + AAD. This is
+    the swapped-block fence inside one `SSTable`; the
+    cross-`SSTable` fence (different `seq`s) lives in
+    cipher.rs's existing AAD-mismatch proptest.
+
+### Notes
+- Public API unchanged. The encrypted writer entry point
+  is `pub(crate)`; users opening a `Lattice` handle with
+  v1.29.0 still see a cleartext-only engine. Phase D
+  (planned v2.0.0) is the release where
+  `LatticeBuilder::encryption_key` lands and the public
+  surface gains the four `EncryptionKey*` error variants.
+- No `Inner`, `LatticeBuilder`, or `Lattice::open_with`
+  changes in this release; the cipher does not yet flow
+  through `lib.rs`. Session 2 of phase B (planned
+  v1.30.0) wires the reader, lands the
+  `encrypted_reopen_with_correct_key_returns_identical_state`
+  property fence chapter 19 specifies, and adds the
+  bit-flip cargo-fuzz target.
+- Hot path untouched on the read side; benchmarks unchanged.
+  The encrypted-write path adds one `Cipher::seal` call per
+  flushed block when the cipher is present, which the
+  v2.0.0 perf budget in chapter 19 already accounts for.
+
 ## [1.28.0] - 2026-05-04
 
 Phase A.5 of the v2.0 encryption-at-rest milestone (book
