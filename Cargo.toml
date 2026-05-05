@@ -25,7 +25,7 @@ lattice-core = { path = "crates/lattice-core", version = "1.29.0" }
 
 # Serialization and binary formats
 serde = { version = "1.0", features = ["derive"] }
-bincode = "2.0"
+bincode = "3.0"
 bytes = "1.7"
 
 # Hashing and integrity
