@@ -64,6 +64,14 @@ jobs:
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
+    # rustsec/audit-check uploads findings as a Check Run; without
+    # explicit `checks: write` the action fails with `Resource not
+    # accessible by integration` on PRs from forks and on workflows
+    # that omit a top-level `permissions:` block.
+    permissions:
+      contents: read
+      checks: write
+      issues: write
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2.0.0

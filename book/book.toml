@@ -1,7 +1,6 @@
 [book]
 authors = ["Nicolas Pilegi De Nigris"]
 language = "en"
-multilingual = false
 src = "src"
 title = "Lattice, by hand"
 description = "Building an LSM-tree storage engine from scratch in Rust."
