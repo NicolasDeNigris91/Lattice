@@ -16,7 +16,14 @@ feature-depth = 1
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+# Acknowledged informational advisories. Each entry must explain why
+# the project accepts the risk; revisit on every dependency bump.
+ignore = [
+    # bincode 1.x is unmaintained — the maintainer published 2.x with
+    # a breaking API change. Lattice still uses 1.x via transitive
+    # deps; tracked for migration but not a runtime security issue.
+    "RUSTSEC-2025-0141",
+]
 
 # Licenses: explicit allow list. Anything outside is rejected.
 # Lattice itself is dual MIT/Apache-2.0; transitively we accept
