@@ -21,7 +21,7 @@ jobs:
     # make sure it is intentional and visible in the PR review.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       # cargo-public-api needs nightly to walk rustdoc's JSON
